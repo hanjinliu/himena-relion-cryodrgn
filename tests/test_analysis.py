@@ -172,6 +172,27 @@ def test_find_volume_series(tmp_path):
     assert [p.name for p in pc1.paths] == [f"vol_{v:03d}.mrc" for v in range(1, 12)]
 
 
+def test_selection_volume_series(tmp_path):
+    select, train = tmp_path / "select", tmp_path / "train_job"
+    assert _analysis.selection_volume_series(select, train) == []
+    _write_mrc(train / "backproject" / "backproject.mrc")
+    _write_mrc(select / "backproject" / "backproject.mrc")
+
+    series = _analysis.selection_volume_series(select, train)
+
+    assert [(s.name, s.paths) for s in series] == [
+        (
+            "Back-projection (selected particles)",
+            [select / "backproject" / "backproject.mrc"],
+        ),
+        (
+            "Back-projection (all particles)",
+            [train / "backproject" / "backproject.mrc"],
+        ),
+    ]
+    assert len(_analysis.selection_volume_series(select)) == 1  # no Train job
+
+
 def test_find_volume_series_empty(tmp_path):
     assert _analysis.find_volume_series(tmp_path) == []
 
@@ -190,3 +211,55 @@ def test_read_volume(tmp_path):
     _write_mrc(path, value=2.0)
     os.utime(path, ns=(0, path.stat().st_mtime_ns + 10**9))
     assert _analysis.read_volume(path)[0][0, 0, 0] == 2.0  # re-read when modified
+
+
+def test_parse_train_log_continued(tmp_path):
+    """Training continued with --load after a finished run is not finished."""
+    first = RUN_LOG + "Training complete\nFinished in 0:03:00\n"
+    more = (
+        "# [Train Epoch: 3/5] [1000/2400 particles] gen loss=0.3, kld=2.0, beta=0.025, "
+        "loss=0.35\n"
+    )
+    (tmp_path / "run.log").write_text(first + more)
+
+    log = _analysis.parse_train_log(tmp_path / "run.log")
+
+    assert not log.finished
+    assert log.num_epochs == 5
+    assert log.current_epoch == 3
+
+
+def test_load_kmeans_centers(tmp_path):
+    for k, centers in ((20, [3, 1, 4]), (5, [9, 2])):
+        d = tmp_path / "analyze.7" / f"kmeans{k}"
+        d.mkdir(parents=True)
+        np.savetxt(d / "centers_ind.txt", centers, fmt="%d")
+
+    assert _analysis.load_kmeans_centers(tmp_path, 7, 20).tolist() == [3, 1, 4]
+    assert _analysis.load_kmeans_centers(tmp_path, 7).tolist() == [9, 2]  # smallest k
+    assert _analysis.load_kmeans_centers(tmp_path, 7, 8) is None
+    assert _analysis.load_kmeans_centers(tmp_path, 8) is None
+
+
+def test_find_volume_series_with_traversals(tmp_path):
+    import json
+
+    _write_mrc(tmp_path / "backproject" / "backproject.mrc")
+    for n, epoch in ((1, 20), (2, 30)):
+        d = tmp_path / f"traversal_00{n}"
+        for v in range(1, 4):
+            _write_mrc(d / f"vol_{v:03d}.mrc")
+        (d / "traversal.json").write_text(json.dumps({"epoch": epoch}))
+    (tmp_path / "traversal_003").mkdir()  # running: no volumes yet
+    for v in range(1, 3):
+        _write_mrc(tmp_path / "train" / "analyze.20" / "pc1" / f"vol_{v:03d}.mrc")
+
+    names = [s.name for s in _analysis.find_volume_series(tmp_path)]
+
+    assert names == [
+        "Back-projection (all particles)",
+        "Graph traversal 2 (epoch 30)",
+        "Graph traversal 1 (epoch 20)",
+        "PC1 (epoch 20)",
+    ]
+    assert _analysis.traversal_dirs(tmp_path).keys() == {1, 2, 3}

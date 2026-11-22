@@ -10,6 +10,7 @@ import pytest
 from fake_cryodrgn import FakeCryoDRGN
 from himena_relion._job_dir import ExternalJobDirectory
 from himena_relion.external import run_function
+from qtpy import QtWidgets as QtW
 
 from himena_relion_cryodrgn import _analysis
 from himena_relion_cryodrgn.select_particles import CryoDrgnSelectParticlesJob
@@ -66,7 +67,7 @@ def test_train_widget_before_training(qtbot, relion_project: RelionProject):
     assert widget._status.text() == "Preparing particles for training..."
     assert len(_lines(widget._loss_canvas)) == 0
     assert len(_scatters(widget._latent_canvas)) == 0
-    assert not widget._viewer.has_image
+    assert not widget._volumes._viewer.has_image
 
 
 def test_train_widget_after_training(qtbot, trained_project: RelionProject):
@@ -82,7 +83,7 @@ def test_train_widget_after_training(qtbot, trained_project: RelionProject):
     assert len(_scatters(widget._latent_canvas)) == 4
     n_points = sum(len(c.get_offsets()) for c in _scatters(widget._latent_canvas))
     assert n_points == 4  # training particles (TS_01/2 and TS_01/4 excluded)
-    assert widget._viewer.has_image  # back-projection
+    assert widget._volumes._viewer.has_image  # back-projection
     widget.widget_added_callback()
 
 
@@ -150,21 +151,15 @@ def _select_widget(qtbot, project: RelionProject) -> QCryoDrgnSelectViewer:
     return widget
 
 
-def _table(widget: QCryoDrgnSelectViewer) -> list[tuple[str, ...]]:
-    t = widget._table
-    return [
-        tuple(t.item(r, c).text() for c in range(t.columnCount()))
-        for r in range(t.rowCount())
-    ]
-
-
 def test_select_widget_waiting(qtbot, trained_project: RelionProject):
     _write_select_job_star(trained_project)
     widget = _select_widget(qtbot, trained_project)
 
     assert widget._summary.text().startswith("Waiting for the selection")
     assert len(_scatters(widget._latent_canvas)) == 1  # all training particles
-    assert _table(widget) == [("TS_01", "0", "6")]
+    # the back-projection of the Train job, before the selection is back-projected
+    assert _volume_sources(widget) == ["Back-projection (all particles)"]
+    assert widget._volumes._viewer.has_image
 
 
 def test_select_widget_after_selection(
@@ -191,17 +186,25 @@ def test_select_widget_after_selection(
         [
             trained_project.select_job_file("indices.pkl"),
             trained_project.select_job_file("particles.star"),
+            trained_project.select_job_file("backproject", "backproject.mrc"),
         ],
     )
 
-    assert widget._summary.text() == "<b>2</b> of 6 particles selected."
+    assert widget._summary.text() == "Selected: <b>2</b>/6 particles"
     not_selected, selected = _scatters(widget._latent_canvas)
     # the lassoed points, not just any two points
     umap = _analysis.load_latent_2d(trained_project.job_file("train")).xy
     np.testing.assert_allclose(selected.get_offsets(), umap[[1, 2]], rtol=1e-5)
     np.testing.assert_allclose(not_selected.get_offsets(), umap[[0, 3]], rtol=1e-5)
-    assert _table(widget) == [("TS_01", "2", "6")]
     widget.widget_added_callback()
+    # the back-projection of the selection is shown, to compare with all particles
+    assert _volume_sources(widget) == [
+        "Back-projection (selected particles)",
+        "Back-projection (all particles)",
+    ]
+    assert widget._volumes._source.currentIndex() == 0
+    assert widget._volumes._info.text().startswith("backproject.mrc")
+    assert widget._volumes._index.isHidden()  # a single volume each
 
 
 def test_select_widget_without_train_job(qtbot, relion_project: RelionProject):
@@ -211,11 +214,11 @@ def test_select_widget_without_train_job(qtbot, relion_project: RelionProject):
     widget = _select_widget(qtbot, relion_project)
 
     assert widget._summary.text().startswith("CryoDRGN Train job not found")
-    assert _table(widget) == []
+    assert _volume_sources(widget) == []
 
 
-def _volume_sources(widget: QCryoDrgnTrainViewer) -> list[str]:
-    combo = widget._volume_source
+def _volume_sources(widget: QCryoDrgnTrainViewer | QCryoDrgnSelectViewer) -> list[str]:
+    combo = widget._volumes._source
     return [combo.itemText(i) for i in range(combo.count())]
 
 
@@ -236,39 +239,82 @@ def test_volume_viewer_reads_volumes_lazily(
         "k-means 20 (epoch 20)",
     ]
     assert reads == ["backproject.mrc"]  # not the 40 volumes of the analysis
-    assert widget._volume_index.isHidden()  # a single volume
+    assert widget._volumes._index.isHidden()  # a single volume
 
-    widget._volume_source.setCurrentIndex(1)  # PC1
-    assert not widget._volume_index.isHidden()
-    assert widget._volume_index.maximum() == 10
+    widget._volumes._source.setCurrentIndex(1)  # PC1
+    assert not widget._volumes._index.isHidden()
+    assert widget._volumes._index.maximum() == 10
     assert reads == ["backproject.mrc", "vol_001.mrc"]
 
-    widget._volume_index.setValue(3)
+    # a slider without label: the name of the volume is in the info line
+    assert isinstance(widget._volumes._index, QtW.QSlider)
+    widget._volumes._index.setValue(3)
     assert reads[-1] == "vol_003.mrc"
     assert len(reads) == 3
-    assert widget._volume_info.text().startswith("vol_003.mrc  (9x9x9, 5.4 Å/pix)")
-    assert widget._viewer.has_image
+    assert widget._volumes._info.text().startswith("vol_003.mrc  (9x9x9, 5.4 Å/pix)")
+    assert widget._volumes._viewer.has_image
 
-    widget._volume_source.setCurrentIndex(3)  # k-means
-    assert widget._volume_index.maximum() == 20
+    widget._volumes._source.setCurrentIndex(3)  # k-means
+    assert widget._volumes._index.maximum() == 20
 
 
 def test_volume_viewer_keeps_selection_on_update(qtbot, trained_project: RelionProject):
     widget = _train_widget(qtbot, trained_project)
-    widget._volume_source.setCurrentIndex(2)  # PC2
-    widget._volume_index.setValue(7)
+    widget._volumes._source.setCurrentIndex(2)  # PC2
+    widget._volumes._index.setValue(7)
 
     # e.g. `cryodrgn analyze` wrote another volume
     vol = trained_project.job_file("train", "analyze.20", "pc2", "vol_007.mrc")
     widget.on_job_files_updated(widget._job_dir, [vol])
 
-    assert widget._volume_source.currentText() == "PC2 (epoch 20)"
-    assert widget._volume_index.value() == 7
-    assert widget._volume_info.text().startswith("vol_007.mrc")
+    assert widget._volumes._source.currentText() == "PC2 (epoch 20)"
+    assert widget._volumes._index.value() == 7
+    assert widget._volumes._info.text().startswith("vol_007.mrc")
 
 
 def test_volume_viewer_before_training(qtbot, relion_project: RelionProject):
     widget = _train_widget(qtbot, relion_project)
     assert _volume_sources(widget) == []
-    assert widget._volume_info.text() == ""
-    assert not widget._viewer.has_image
+    assert widget._volumes._info.text() == ""
+    assert not widget._volumes._viewer.has_image
+
+
+def test_train_widget_after_continue(
+    qtbot, trained_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
+):
+    from test_continue import _continue_job
+
+    _continue_job(trained_project, n_epochs=30)
+    widget = _train_widget(qtbot, trained_project)
+
+    assert widget._status.text() == "Training complete (30 epochs)."
+    total, _ = _lines(widget._loss_canvas)
+    assert len(total.get_xdata()) == 30
+    assert "epoch 30" in widget._latent_title.text()
+    sources = _volume_sources(widget)
+    assert sources[1] == "PC1 (epoch 30)"  # the latest analysis first
+    assert "PC1 (epoch 20)" in sources
+
+
+def test_volume_viewer_shows_graph_traversals(
+    qtbot, trained_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
+):
+    from test_graph_traversal import _traverse
+
+    widget = _train_widget(qtbot, trained_project)
+    assert not any(s.startswith("Graph traversal") for s in _volume_sources(widget))
+
+    _traverse(trained_project, anchors="0,3")  # 3 volumes in traversal_001
+    vol = trained_project.job_file("traversal_001", "vol_003.mrc")
+    widget.on_job_files_updated(widget._job_dir, [vol])
+
+    sources = _volume_sources(widget)
+    assert sources[:2] == [
+        "Back-projection (all particles)",
+        "Graph traversal 1 (epoch 20)",
+    ]
+    widget._volumes._source.setCurrentIndex(1)
+    assert widget._volumes._index.maximum() == 3
+    widget._volumes._index.setValue(2)
+    assert widget._volumes._info.text().startswith("vol_002.mrc")
+    assert widget._volumes._viewer.has_image

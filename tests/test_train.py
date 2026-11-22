@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 # The import path is written in job.star as `fn_exe`. Changing it breaks existing jobs.
 IMPORT_PATH = "himena_relion_cryodrgn.train:CryoDrgnTrainJob"
 STEPS = ["parse_relion", "parse_star", "downsample", "backproject_voxel", "train_vae"]
+NETWORK_OPTIONS = ["--zdim", "--enc-layers", "--enc-dim", "--dec-layers", "--dec-dim"]
 
 
 def _run_job(project: RelionProject, **params) -> None:
@@ -65,6 +66,61 @@ def test_prep_job_star():
         if opts[f"param{i}_label"]
     }
     assert params == {"box_size": "64", "dose_per_tilt": "2.5"}
+
+
+def test_all_parameters_fit_in_the_slots():
+    """All the parameters are in the 10 slots of RELION (shown in the RELION GUI)."""
+    model = CryoDrgnTrainJob.prep_job_star(
+        in_mics="Tomograms/job005/tomograms.star",
+        in_parts="Extract/job010/particles.star",
+        box_size=64,
+        lazy=True,
+        n_epochs=50,
+        dose_per_tilt=2.5,
+        zdim=4,
+        enc_layers=2,
+        enc_dim=256,
+        dec_layers=4,
+        dec_dim=512,
+        cryodrgn_bin_dir="/opt/cryodrgn/bin",
+    )
+    opts = dict(zip(model.joboptions_values.variable, model.joboptions_values.value))
+    labels = {opts[f"param{i}_label"] for i in range(1, 11)}
+    assert labels == set(CryoDrgnTrainJob._signature().parameters) - {
+        "in_mics",
+        "in_parts",
+    }
+    assert opts["other_args"] == ""
+
+
+def test_default_network(relion_project: RelionProject, fake_cryodrgn: FakeCryoDRGN):
+    _run_job(relion_project)
+
+    cmd = [c for c in fake_cryodrgn.calls if c[1] == "train_vae"][-1]
+    # given explicitly: the defaults of cryoDRGN (zdim has none)
+    network = {opt: cmd[cmd.index(opt) + 1] for opt in NETWORK_OPTIONS}
+    assert network == {
+        "--zdim": "8",
+        "--enc-layers": "3",
+        "--enc-dim": "1024",
+        "--dec-layers": "3",
+        "--dec-dim": "1024",
+    }
+
+
+def test_network_parameters(relion_project: RelionProject, fake_cryodrgn: FakeCryoDRGN):
+    network = {
+        "zdim": 4,
+        "enc_layers": 2,
+        "enc_dim": 256,
+        "dec_layers": 4,
+        "dec_dim": 512,
+    }
+    _run_job(relion_project, **network)
+
+    vae = fake_cryodrgn.parsed("train_vae")
+    assert {name: getattr(vae, name) for name in network} == network
+    assert relion_project.job_file("RELION_JOB_EXIT_SUCCESS").exists()
 
 
 def test_dry_run_succeeds(relion_project: RelionProject, fake_cryodrgn: FakeCryoDRGN):
@@ -195,3 +251,68 @@ def test_abort_between_steps(
     assert fake_cryodrgn.subcommands == STEPS[:3]
     assert relion_project.job_file("RELION_JOB_EXIT_ABORTED").exists()
     assert not relion_project.job_file("RELION_JOB_ABORT_NOW").exists()
+
+
+def test_parse_relion_output(
+    relion_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
+):
+    _run_job(relion_project)
+
+    parsed = relion_project.job_file("particles_parsed.star")
+    assert Path(fake_cryodrgn.parsed("parse_relion").output) == parsed
+    assert Path(fake_cryodrgn.parsed("parse_star").input) == parsed
+    assert Path(fake_cryodrgn.parsed("downsample").input) == parsed
+
+
+def test_training_star_is_the_downsampled_star(
+    relion_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
+):
+    """box_size (128) < extracted box (192): training uses the downsampled images."""
+    _run_job(relion_project, box_size=128)
+
+    downsampled = relion_project.job_file("downsample", "particles_downsampled.star")
+    assert Path(fake_cryodrgn.parsed("backproject_voxel").particles) == downsampled
+    assert Path(fake_cryodrgn.parsed("train_vae").particles) == downsampled
+
+
+def test_training_star_without_downsampling(
+    relion_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
+):
+    """box_size = extracted box (192): training uses the parsed star."""
+    _run_job(relion_project, box_size=relion_project.image_size)
+
+    assert "downsample" not in fake_cryodrgn.subcommands
+    parsed = relion_project.job_file("particles_parsed.star")
+    assert Path(fake_cryodrgn.parsed("backproject_voxel").particles) == parsed
+    assert Path(fake_cryodrgn.parsed("train_vae").particles) == parsed
+    assert not relion_project.job_file("downsample").exists()
+
+
+def test_output_nodes_are_registered(
+    relion_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
+):
+    _run_job(relion_project)
+
+    pipeline = RelionPipeline.from_star(relion_project.job_file("job_pipeline.star"))
+    registered = {node.path.as_posix(): node.type_label for node in pipeline.outputs}
+    assert registered == {
+        "External/job011/weights.pkl": "CryodrgnWeights.pkl",
+        # the RELION particles trained on, passed to CryoDRGN Select
+        "External/job011/particles.star": "ParticleGroupMetadata.star",
+        # the back-projection of all the training particles (a 3D reference)
+        "External/job011/backproject/backproject.mrc": "DensityMap.mrc",
+    }
+    assert relion_project.job_file("backproject", "backproject.mrc").exists()
+
+
+def test_input_particles_are_copied(
+    relion_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
+):
+    """particles.star is a copy (not a link) of the input, so it does not change
+    when the upstream job is run again."""
+    _run_job(relion_project)
+
+    copy = relion_project.job_file("particles.star")
+    original = relion_project.root / relion_project.particles_star
+    assert not copy.is_symlink()
+    assert copy.read_bytes() == original.read_bytes()

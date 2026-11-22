@@ -53,7 +53,7 @@ def test_plugin_module_registers_job():
 
     assert CryoDrgnSelectParticlesJob.import_path() == IMPORT_PATH
     assert pick_job_class(IMPORT_PATH) is CryoDrgnSelectParticlesJob
-    assert CryoDrgnSelectParticlesJob.job_title() == "CryoDRGN Select Particles"
+    assert CryoDrgnSelectParticlesJob.job_title() == "CryoDRGN Select"
 
 
 def test_prep_job_star():
@@ -81,7 +81,11 @@ def test_selected_particles_star(
 
     _run_select(trained_project)
 
-    assert fake_cryodrgn.subcommands == ["filter", "filter_star"]
+    assert fake_cryodrgn.subcommands == [
+        "filter",
+        "filter_star",
+        "backproject_voxel",
+    ]
     assert trained_project.select_job_file("RELION_JOB_EXIT_SUCCESS").exists()
     output = trained_project.select_job_file("particles.star")
     assert _particle_names(output) == ["TS_01/3", "TS_01/5"]
@@ -123,8 +127,24 @@ def test_filter_command(trained_project: RelionProject, fake_cryodrgn: FakeCryoD
     assert flt.force  # never prompt on the terminal
     assert Path(flt.sel_dir) == trained_project.select_job_file()
     star = fake_cryodrgn.parsed("filter_star")
-    assert Path(star.input) == trained_project.root / trained_project.particles_star
+    # the copy of the RELION particles in the Train job
+    assert Path(star.input) == trained_project.job_file("particles.star")
     assert not star.et  # particles.star has one row per particle
+
+
+def test_train_job_without_particles_copy(
+    trained_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
+):
+    """A Train job run before particles.star was copied: its input is used."""
+    trained_project.job_file("particles.star").unlink()
+    fake_cryodrgn.filter_selection = [1, 2]
+
+    _run_select(trained_project)
+
+    star = fake_cryodrgn.parsed("filter_star")
+    assert Path(star.input) == trained_project.root / trained_project.particles_star
+    output = trained_project.select_job_file("particles.star")
+    assert _particle_names(output) == ["TS_01/3", "TS_01/5"]
 
 
 def test_commands_run_from_bin_dir(
@@ -133,7 +153,11 @@ def test_commands_run_from_bin_dir(
     fake_cryodrgn.filter_selection = [0]
     _run_select(trained_project, cryodrgn_bin_dir=cryodrgn_bin_dir)
 
-    assert fake_cryodrgn.subcommands == ["filter", "filter_star"]
+    assert fake_cryodrgn.subcommands == [
+        "filter",
+        "filter_star",
+        "backproject_voxel",
+    ]
     for cmd in fake_cryodrgn.calls:
         assert Path(cmd[0]).parent == cryodrgn_bin_dir
 
@@ -146,8 +170,13 @@ def test_output_node(trained_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
         trained_project.select_job_file("job_pipeline.star")
     )
     registered = {node.path.as_posix(): node.type_label for node in pipeline.outputs}
-    path = f"{trained_project.select_job_dir.as_posix()}/particles.star"
-    assert registered == {path: "ParticleGroupMetadata.star"}
+    job = trained_project.select_job_dir.as_posix()
+    assert registered == {
+        f"{job}/particles.star": "ParticleGroupMetadata.star",
+        # the back-projection of the selected particles (a 3D reference)
+        f"{job}/backproject/backproject.mrc": "DensityMap.mrc",
+    }
+    assert trained_project.select_job_file("backproject", "backproject.mrc").exists()
 
 
 def test_no_selection_fails(
@@ -189,3 +218,81 @@ def test_weights_of_another_job_are_rejected(
         _run_select(trained_project, train_weights="External/job013/weights.pkl")
 
     assert fake_cryodrgn.calls == []
+
+
+def test_selection_is_backprojected(
+    trained_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
+):
+    """The selected particles, not all of them, are back-projected to validate it."""
+    fake_cryodrgn.filter_selection = [1, 2]  # cryoDRGN particles 1 and 3
+    _run_select(trained_project, dose_per_tilt=2.5, lazy=True)
+
+    bp = fake_cryodrgn.parsed("backproject_voxel")
+    # the images, CTF and poses of the training (one row per tilt image)
+    assert Path(bp.particles) == trained_project.job_file(
+        "downsample", "particles_downsampled.star"
+    )
+    assert Path(bp.ctf) == trained_project.job_file("ctf.pkl")
+    assert Path(bp.poses) == trained_project.job_file("poses.pkl")
+    assert Path(bp.ind) == trained_project.select_job_file("indices.pkl")
+    assert not bp.force_ntilts  # would override --ind
+    assert bp.tilt
+    assert bp.dose_per_tilt == pytest.approx(2.5)
+    assert bp.lazy
+    assert fake_cryodrgn.backprojected["backproject"] == [1, 3]
+    assert trained_project.select_job_file("backproject", "backproject.mrc").exists()
+
+
+def test_input_particles(trained_project: RelionProject, fake_cryodrgn: FakeCryoDRGN):
+    """in_parts: the RELION particles the model was trained on (an input node)."""
+    fake_cryodrgn.filter_selection = [1, 2]
+    _run_select(trained_project, in_parts=trained_project.particles_star)
+
+    star = fake_cryodrgn.parsed("filter_star")
+    # as given by RELION, relative to the project (the job runs there)
+    assert Path(star.input) == Path(trained_project.particles_star)
+    output = trained_project.select_job_file("particles.star")
+    assert _particle_names(output) == ["TS_01/3", "TS_01/5"]
+    job_star = CryoDrgnSelectParticlesJob.prep_job_star(
+        train_weights="External/job011/weights.pkl",
+        in_parts=trained_project.particles_star,
+    )
+    opts = dict(
+        zip(job_star.joboptions_values.variable, job_star.joboptions_values.value)
+    )
+    assert opts["in_part"] == trained_project.particles_star  # an input edge
+
+
+def test_input_particles_copy(
+    trained_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
+):
+    """A copy of the trained particles (e.g. moved by the user) can be used."""
+    import shutil
+
+    copy = trained_project.root / "Select/job030/particles.star"
+    copy.parent.mkdir(parents=True)
+    shutil.copy(trained_project.root / trained_project.particles_star, copy)
+    fake_cryodrgn.filter_selection = [0]
+
+    _run_select(trained_project, in_parts="Select/job030/particles.star")
+
+    assert Path(fake_cryodrgn.parsed("filter_star").input).resolve() == copy
+    output = trained_project.select_job_file("particles.star")
+    assert list(read_star(output).keys()) == ["general", "optics", "particles"]
+
+
+def test_select_from_continued_train_job(
+    trained_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
+):
+    """A continued Train job (fn_exe of the continue class) is still a Train job."""
+    from test_continue import _continue_job
+
+    _continue_job(trained_project, n_epochs=30)
+    fake_cryodrgn.calls.clear()
+    fake_cryodrgn.filter_selection = [1, 2]
+
+    _run_select(trained_project)
+
+    assert trained_project.select_job_file("RELION_JOB_EXIT_SUCCESS").exists()
+    output = trained_project.select_job_file("particles.star")
+    assert _particle_names(output) == ["TS_01/3", "TS_01/5"]

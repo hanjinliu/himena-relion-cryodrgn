@@ -12,9 +12,17 @@ from starfile_rs import read_star
 from starfile_rs.components import SingleDataBlock
 from starfile_rs.core import StarDict
 
+# 2D particle star file written by `cryodrgn_utils parse_relion` (one row per tilt
+# image, with rlnGroupName and rlnOriginalParticle)
+PARSED_PARTICLES = "particles_parsed.star"
+
 # Number of tilts per particle used by `backproject_voxel --force-ntilts` and
 # `train_vae`. Both commands default to 10 in cryoDRGN.
 DEFAULT_NTILTS = 10
+
+# Volume back-projected by the Train job (all particles) and the Select job (the
+# selected particles), relative to the job directory: an output node (3D reference).
+BACKPROJECTION = "backproject/backproject.mrc"
 
 CRYODRGN = "cryodrgn"
 CRYODRGN_UTILS = "cryodrgn_utils"
@@ -30,26 +38,19 @@ def _run(args: list[str], bin_dir: str = "", suppress_output: bool = False) -> N
 
     If `bin_dir` is given, the command is taken from there and `bin_dir` is put first
     in PATH, so that cryoDRGN can be installed in another environment than
-    himena-relion without activating it.
+    himena-relion without activating it. `suppress_output` discards the standard
+    output only; error messages (stderr) still go to run.err.
     """
+    stdout = subprocess.DEVNULL if suppress_output else None
     if not bin_dir:
-        subprocess.run(args, check=True)
+        subprocess.run(args, check=True, stdout=stdout)
         return
     exe = find_command(args[0], bin_dir)
     if exe is None:
         raise FileNotFoundError(f"`{args[0]}` was not found in {bin_dir}.")
     env = os.environ.copy()
     env["PATH"] = os.pathsep.join([bin_dir, env.get("PATH", "")])
-    if suppress_output:
-        subprocess.run(
-            [exe, *args[1:]],
-            check=True,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    else:
-        subprocess.run([exe, *args[1:]], check=True, env=env)
+    subprocess.run([exe, *args[1:]], check=True, env=env, stdout=stdout)
 
 
 def _first_value(star_path, column: str, block: str | None = None):
@@ -95,7 +96,7 @@ def cryodrgn_parse_relion(
     ts_path = str(_first_value(tomo_star_path, "rlnTomoTiltSeriesStarFile"))
     img_path = str(_first_value(ts_path, "rlnMicrographName"))
     output_dir = Path(output_dir)
-    output_particles_file = output_dir / "particles_2d.star"
+    output_particles_file = output_dir / PARSED_PARTICLES
     with mrcfile.open(img_path, header_only=True) as mrc:
         header = mrc.header
         assert header is not None
@@ -129,7 +130,7 @@ def cryodrgn_parse_star(
 ):
     """Write ctf.pkl and poses.pkl.
 
-    `apix` and `image_size` must be those of the images referred to by `input_star`
+    `apix` and `box_size` must be those of the images referred to by `input_star`
     (the extracted particles, before downsampling). cryoDRGN rescales the CTF pixel
     size from these values when training on downsampled images.
     """
@@ -179,33 +180,63 @@ def cryodrgn_backproject_voxel(
     dose_per_tilt: float | None = None,
     ntilts: int = DEFAULT_NTILTS,
     lazy: bool = False,
+    indices_file=None,
+    force_ntilts: bool = True,
     bin_dir: str = "",
 ):
     """Back-project the particles. Tilt-series mode is used if `dose_per_tilt` is given.
 
-    In tilt-series mode, particles with fewer than `ntilts` tilts are dropped and the
-    indices of the remaining particles are returned.
+    In tilt-series mode with `force_ntilts`, particles with fewer than `ntilts` tilts
+    are dropped and the indices of the remaining particles are returned. To
+    back-project selected particles, give `indices_file` with `force_ntilts=False`:
+    `--force-ntilts` overrides `--ind` in cryoDRGN.
     """
+    if indices_file is not None and force_ntilts and dose_per_tilt is not None:
+        raise ValueError("`indices_file` is ignored by cryoDRGN with `force_ntilts`.")
     args = [
         "cryodrgn", "backproject_voxel", str(particles_star),
         "--ctf", str(ctf_file),
         "--poses", str(poses_file),
         "-o", str(output_dir),
     ]  # fmt: skip
-    indices_file = None
+    if indices_file is not None:
+        args += ["--ind", str(indices_file)]
+    kept_indices = None
     if dose_per_tilt is not None:
         args += [
             "--tilt",
             "--dose-per-tilt", str(round(dose_per_tilt, 3)),
             "--ntilts", str(ntilts),
-            "--force-ntilts",
         ]  # fmt: skip
-        # file name defined in cryodrgn/commands/backproject_voxel.py
-        indices_file = str(Path(output_dir) / f"indices_force_ntilts_{ntilts}.pkl")
+        if force_ntilts:
+            args.append("--force-ntilts")
+            # file name defined in cryodrgn/commands/backproject_voxel.py
+            kept_indices = str(Path(output_dir) / f"indices_force_ntilts_{ntilts}.pkl")
     if lazy:
         args.append("--lazy")
     _run(args, bin_dir=bin_dir)
-    return BackprojectOutput(indices_file=indices_file)
+    return BackprojectOutput(indices_file=kept_indices)
+
+
+@dataclass(frozen=True)
+class VaeArchitecture:
+    """Network of `cryodrgn train_vae`. The defaults are those of cryoDRGN (zdim has
+    no default in cryoDRGN; 8 is the one used in the cryoDRGN docs)."""
+
+    zdim: int = 8
+    enc_layers: int = 3
+    enc_dim: int = 1024
+    dec_layers: int = 3
+    dec_dim: int = 1024
+
+    def args(self) -> list[str]:
+        return [
+            "--zdim", str(self.zdim),
+            "--enc-layers", str(self.enc_layers),
+            "--enc-dim", str(self.enc_dim),
+            "--dec-layers", str(self.dec_layers),
+            "--dec-dim", str(self.dec_dim),
+        ]  # fmt: skip
 
 
 def cryodrgn_train_vae(
@@ -215,12 +246,19 @@ def cryodrgn_train_vae(
     output_dir,
     dose_per_tilt: float = 3.0,
     n_epochs: int = 20,
-    zdim: int = 8,
+    architecture: VaeArchitecture = VaeArchitecture(),
     beta: float = 0.025,
     ntilts: int = DEFAULT_NTILTS,
     indices_file: str | None = None,
+    load: str | Path | None = None,
     bin_dir: str = "",
 ):
+    """Train the VAE for tilt series.
+
+    `n_epochs` is the total number of epochs. To train longer, pass the last
+    checkpoint (`weights.{epoch}.pkl`) as `load` with a larger `n_epochs`; the other
+    arguments, the architecture in particular, must be the same as in the first run.
+    """
     cmd = [
         "cryodrgn", "train_vae", str(particles_star),
         "--ctf", str(ctf_file),
@@ -228,14 +266,88 @@ def cryodrgn_train_vae(
         "--encode-mode", "tilt",
         "--dose-per-tilt", str(round(dose_per_tilt, 3)),
         "--ntilts", str(ntilts),
-        "--zdim", str(zdim),
+        *architecture.args(),
         "--beta", str(round(beta, 4)),
         "--num-epochs", str(n_epochs),
         "-o", str(output_dir),
     ]  # fmt: skip
     if indices_file:
         cmd.extend(["--ind", str(indices_file)])
+    if load is not None:
+        cmd.extend(["--load", str(load)])
     _run(cmd, bin_dir=bin_dir)
+
+
+# --- volumes along a path in the latent space --------------------------------------
+
+
+@dataclass
+class GraphTraversalOutput:
+    z_path_file: str  # z values of the points on the path (one row per point)
+    indices_file: str  # rows of the z file on the path
+
+
+def cryodrgn_graph_traversal(
+    z_file,
+    anchors: list[int],
+    output_dir,
+    max_neighbors: int = 10,
+    avg_neighbors: float = 5,
+    bin_dir: str = "",
+) -> GraphTraversalOutput:
+    """Shortest path through the nearest-neighbor graph of z, visiting the anchors.
+
+    `anchors` are rows of `z_file` (z.{epoch}.pkl), e.g. the particles closest to
+    the k-means centers (analyze.{epoch}/kmeans{K}/centers_ind.txt).
+    """
+    output_dir = Path(output_dir)
+    out = GraphTraversalOutput(
+        z_path_file=str(output_dir / "z_path.txt"),
+        indices_file=str(output_dir / "z_path_indices.txt"),
+    )
+    _run(
+        [
+            "cryodrgn", "graph_traversal", str(z_file),
+            "--anchors", *[str(int(a)) for a in anchors],
+            "--max-neighbors", str(max_neighbors),
+            "--avg-neighbors", str(avg_neighbors),
+            "-o", out.z_path_file,
+            "--outind", out.indices_file,
+        ],
+        bin_dir=bin_dir,
+    )  # fmt: skip
+    return out
+
+
+def cryodrgn_eval_vol(
+    weights,
+    config,
+    z_file,
+    output_dir,
+    apix: float,
+    downsample: int | None = None,
+    flip: bool = False,
+    invert: bool = False,
+    bin_dir: str = "",
+) -> None:
+    """Generate a volume for each row of `z_file`: output_dir/vol_001.mrc, ...
+
+    `apix` is written to the MRC header (cryoDRGN does not know it and uses 1 Å).
+    """
+    args = [
+        "cryodrgn", "eval_vol", str(weights),
+        "-c", str(config),
+        "--zfile", str(z_file),
+        "-o", str(output_dir),
+        "--Apix", str(round(apix, 4)),
+    ]  # fmt: skip
+    if downsample is not None:
+        args += ["-d", str(downsample)]
+    if flip:
+        args.append("--flip")
+    if invert:
+        args.append("--invert")
+    _run(args, bin_dir=bin_dir)
 
 
 # --- particle selection ----------------------------------------------------------
@@ -311,7 +423,7 @@ def cryodrgn_filter(
     return out
 
 
-def particle_indices_to_star_rows(particles_2d_star, particle_indices) -> np.ndarray:
+def particle_indices_to_star_rows(parsed_star, particle_indices) -> np.ndarray:
     """Convert cryoDRGN particle indices to row indices of the RELION particles.star.
 
     For tilt series, cryoDRGN numbers the particles in the order of first appearance
@@ -323,11 +435,11 @@ def particle_indices_to_star_rows(particles_2d_star, particle_indices) -> np.nda
     Returns sorted unique row indices, so that the particle order of particles.star
     is kept.
     """
-    df = read_star(particles_2d_star).first().trust_loop().to_polars()
+    df = read_star(parsed_star).first().trust_loop().to_polars()
     for column in ("rlnGroupName", "rlnOriginalParticle"):
         if column not in df.columns:
             raise ValueError(
-                f"{particles_2d_star} has no column {column!r}. It must be written by "
+                f"{parsed_star} has no column {column!r}. It must be written by "
                 "`cryodrgn_utils parse_relion`."
             )
     particles = df.unique(subset="rlnGroupName", keep="first", maintain_order=True)

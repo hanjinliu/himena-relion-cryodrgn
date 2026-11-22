@@ -52,8 +52,10 @@ class _CryoDrgnJob(RelionExternalJob):
     def prep_job_star(cls, **kwargs):
         if bin_dir := cls._resolve_bin_dir(kwargs):
             kwargs["cryodrgn_bin_dir"] = bin_dir
-        else:
-            # Not written to job.star at all, so that the default ("" = PATH) is used.
-            # An empty parameter value could reach the job as a bare flag.
-            kwargs.pop("cryodrgn_bin_dir", None)
+        # Empty strings are not written to job.star, so that the default ("") is used:
+        # RELION passes a parameter with an empty value as a bare flag (`--name`),
+        # which himena-relion reads as True.
+        kwargs = {
+            k: v for k, v in kwargs.items() if not (isinstance(v, str) and v == "")
+        }
         return super().prep_job_star(**kwargs)

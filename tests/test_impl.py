@@ -173,3 +173,34 @@ def test_filter_removes_stale_selection(tmp_path, fake_cryodrgn: FakeCryoDRGN):
     with pytest.raises(RuntimeError, match="No particles were selected"):
         _impl.cryodrgn_filter(workdir, sel_dir=tmp_path)
     assert not (tmp_path / "indices.pkl").exists()
+
+
+@pytest.mark.parametrize("bin_dir", [False, True])
+def test_run_suppresses_only_stdout(
+    monkeypatch: pytest.MonkeyPatch, cryodrgn_bin_dir, bin_dir: bool
+):
+    """Output is suppressed with or without bin_dir; errors still go to run.err."""
+    import subprocess
+
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: calls.append(kw))
+    _impl._run(
+        ["cryodrgn", "downsample"],
+        bin_dir=str(cryodrgn_bin_dir) if bin_dir else "",
+        suppress_output=True,
+    )
+    (kwargs,) = calls
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert "stderr" not in kwargs
+
+
+def test_backproject_indices_with_force_ntilts(tmp_path):
+    with pytest.raises(ValueError, match="force_ntilts"):
+        _impl.cryodrgn_backproject_voxel(
+            tmp_path / "particles.star",
+            tmp_path / "ctf.pkl",
+            tmp_path / "poses.pkl",
+            tmp_path / "out",
+            dose_per_tilt=3.0,
+            indices_file=tmp_path / "ind.pkl",
+        )

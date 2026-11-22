@@ -8,8 +8,7 @@ PLUGIN_ID = "himena-relion-cryodrgn"
 
 @dataclass
 class CryoDrgnConfig:
-    # config_field returns a dataclass field, which pyright cannot type as str.
-    bin_dir: str = config_field(  # pyright: ignore[reportAssignmentType]
+    bin_dir: str = config_field(
         default="",
         label="cryoDRGN <code>bin</code> Directory",
         tooltip=(

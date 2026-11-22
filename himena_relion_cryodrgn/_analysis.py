@@ -9,6 +9,8 @@ from pathlib import Path
 import mrcfile
 import numpy as np
 
+from himena_relion_cryodrgn import _impl
+
 _FLOAT = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|nan|inf"
 # `# =====> Epoch: {} Average gen loss = {:.6}, KLD = {:.6f}, total loss = {:.6f}; ...`
 _EPOCH_SUMMARY = re.compile(
@@ -59,9 +61,11 @@ def parse_train_log(path) -> TrainLog:
                     float(m.group(3)),
                     float(m.group(4)),
                 )
+                log.finished = False  # training continued (--load) after a finished run
             elif m := _TRAIN_BATCH.search(line):
                 log.current_epoch = int(m.group(1))
                 log.num_epochs = int(m.group(2))
+                log.finished = False
             elif "Training complete" in line:
                 log.finished = True
     for epoch in sorted(summaries):
@@ -176,6 +180,7 @@ _VOLUME = re.compile(r"vol_(\d+)\.mrc")
 _ANALYZE_DIR = re.compile(r"analyze\.(\d+)")
 _PC_DIR = re.compile(r"pc(\d+)")
 _KMEANS_DIR = re.compile(r"kmeans(\d+)")
+_TRAVERSAL_DIR = re.compile(r"traversal_(\d+)")
 
 
 @dataclass
@@ -186,15 +191,33 @@ class VolumeSeries:
     paths: list[Path]  # in order (vol_001.mrc, vol_002.mrc, ...)
 
 
-def _volume_files(directory: Path) -> list[Path]:
+def volume_files(directory) -> list[Path]:
     files = _numbered_files(directory, _VOLUME)
     return [files[k] for k in sorted(files)]
+
+
+def selection_volume_series(select_job_path, train_job_path=None) -> list[VolumeSeries]:
+    """Back-projections of a CryoDRGN Select job: of the selected particles, and of
+    all the particles (the CryoDRGN Train job) to compare with."""
+    series = []
+    selected = Path(select_job_path) / _impl.BACKPROJECTION
+    if selected.is_file():
+        series.append(VolumeSeries("Back-projection (selected particles)", [selected]))
+    if train_job_path is not None:
+        all_particles = Path(train_job_path) / _impl.BACKPROJECTION
+        if all_particles.is_file():
+            series.append(
+                VolumeSeries("Back-projection (all particles)", [all_particles])
+            )
+    return series
 
 
 def find_volume_series(job_path) -> list[VolumeSeries]:
     """Volume series of a CryoDRGN Train job directory.
 
     - the back-projection of all particles (backproject/backproject.mrc)
+    - the volumes along each graph traversal (traversal_NNN/vol_001.mrc ..., latest
+      first), written by "Graph Traversal - CryoDRGN Train"
     - for each analysis (train/analyze.{epoch}, latest first), the volumes along
       each principal component (pc{i}/vol_001.mrc ...) and at the k-means centers
       (kmeans{K}/vol_001.mrc ...), as written by `cryodrgn analyze`.
@@ -203,19 +226,26 @@ def find_volume_series(job_path) -> list[VolumeSeries]:
     """
     job_path = Path(job_path)
     series = []
-    backprojection = job_path / "backproject" / "backproject.mrc"
+    backprojection = job_path / _impl.BACKPROJECTION
     if backprojection.is_file():
         series.append(VolumeSeries("Back-projection (all particles)", [backprojection]))
+    traversals = traversal_dirs(job_path)
+    for number in sorted(traversals, reverse=True):
+        if paths := volume_files(traversals[number]):
+            name = f"Graph traversal {number}"
+            if (epoch := _traversal_epoch(traversals[number])) is not None:
+                name += f" (epoch {epoch})"
+            series.append(VolumeSeries(name, paths))
     analyze_dirs = _numbered_files(job_path / "train", _ANALYZE_DIR)
     for epoch in sorted(analyze_dirs, reverse=True):
         anlzdir = analyze_dirs[epoch]
         pc_dirs = _numbered_files(anlzdir, _PC_DIR)
         for i in sorted(pc_dirs):
-            if paths := _volume_files(pc_dirs[i]):
+            if paths := volume_files(pc_dirs[i]):
                 series.append(VolumeSeries(f"PC{i} (epoch {epoch})", paths))
         kmeans_dirs = _numbered_files(anlzdir, _KMEANS_DIR)
         for k in sorted(kmeans_dirs):
-            if paths := _volume_files(kmeans_dirs[k]):
+            if paths := volume_files(kmeans_dirs[k]):
                 series.append(VolumeSeries(f"k-means {k} (epoch {epoch})", paths))
     return series
 
@@ -232,3 +262,37 @@ def read_volume(path) -> tuple[np.ndarray, float]:
     """Read a volume and its voxel size (Å). The last few volumes are cached."""
     path = Path(path)
     return _read_volume(str(path), path.stat().st_mtime_ns)
+
+
+def load_kmeans_centers(workdir, epoch: int, kmeans: int = -1) -> np.ndarray | None:
+    """Rows of z.{epoch}.pkl closest to the k-means centers (centers_ind.txt)."""
+    anlzdir = Path(workdir) / f"analyze.{epoch}"
+    if kmeans == -1:
+        dirs = _numbered_files(anlzdir, _KMEANS_DIR)
+        if not dirs:
+            return None
+        path = dirs[min(dirs)] / "centers_ind.txt"
+    else:
+        path = anlzdir / f"kmeans{kmeans}" / "centers_ind.txt"
+    if not path.is_file():
+        return None
+    return np.loadtxt(path, dtype=int, ndmin=1)
+
+
+def traversal_dirs(job_path) -> dict[int, Path]:
+    """Subdirectories of the graph traversals of a Train job: {1: traversal_001, ...}"""
+    return {
+        n: path
+        for n, path in _numbered_files(job_path, _TRAVERSAL_DIR).items()
+        if path.is_dir()
+    }
+
+
+def _traversal_epoch(traversal_dir: Path) -> int | None:
+    """Epoch of the model used for a graph traversal (traversal.json)."""
+    import json
+
+    try:
+        return int(json.loads((traversal_dir / "traversal.json").read_text())["epoch"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None

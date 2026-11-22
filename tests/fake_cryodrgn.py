@@ -17,6 +17,7 @@ as a non-zero return code, like the real command.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import pickle
@@ -182,8 +183,15 @@ def _downsample_run(a: argparse.Namespace, fake: FakeCryoDRGN) -> None:
         raise CLIError(f"cryodrgn downsample: new box size must be even, got {a.D}")
     outdir = Path(a.outdir or os.path.dirname(a.outfile))
     _touch(outdir / "particles.mrcs")
-    # Same rows in the same order; only the image names would change.
-    Path(a.outfile).write_text(Path(a.input).read_text())
+    # Same rows in the same order. The image names are made relative to --outdir
+    # (`os.path.relpath(newpath, outdir)`), so the star file only works from there.
+    lines = []
+    for line in Path(a.input).read_text().splitlines():
+        if "@" in (tokens := line.split() or [""])[0]:
+            index = tokens[0].split("@")[0]
+            line = " ".join([f"{index}@particles.mrcs", *tokens[1:]])
+        lines.append(line)
+    Path(a.outfile).write_text("\n".join(lines) + "\n")
 
 
 # --- cryodrgn backproject_voxel --------------------------------------------------
@@ -226,6 +234,17 @@ def _backproject_voxel_run(a: argparse.Namespace, fake: FakeCryoDRGN) -> None:
         raise CLIError("cryodrgn backproject_voxel: --tilt requires --dose-per-tilt")
     if a.force_ntilts and not a.tilt:
         raise CLIError("cryodrgn backproject_voxel: --force-ntilts requires --tilt")
+    if a.tilt:
+        # TiltSeriesData groups the tilt images of a particle by rlnGroupName
+        columns = read_star(a.particles).first().trust_loop().columns
+        if "rlnGroupName" not in columns:
+            raise CommandFailed(f"{a.particles} is not a star file of tilt images")
+        n_particles = len(_particles_of_tilt_star(a.particles))
+        if a.ind is not None and not a.force_ntilts:
+            ind = np.asarray(_load_pkl(a.ind), dtype=int)
+            if ind.size and (ind.min() < 0 or ind.max() >= n_particles):
+                raise CommandFailed("--ind has indices out of the particles")
+            fake.backprojected[outdir_key(a.outdir)] = ind.tolist()
     outdir = Path(a.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     with mrcfile.new(outdir / "backproject.mrc", overwrite=True) as mrc:
@@ -329,18 +348,43 @@ def _train_vae_run(a: argparse.Namespace, fake: FakeCryoDRGN) -> None:
             "poses": a.poses,
             "ind": a.ind,
         },
-        "model_args": {"encode_mode": a.encode_mode, "zdim": a.zdim},
+        # the names in the config.yaml of cryoDRGN
+        "model_args": {
+            "encode_mode": a.encode_mode,
+            "zdim": a.zdim,
+            "qlayers": a.enc_layers,
+            "qdim": a.enc_dim,
+            "players": a.dec_layers,
+            "pdim": a.dec_dim,
+        },
     }
+    start_epoch = 1
+    if a.load is not None:
+        # torch.load(...)["epoch"] + 1; the fake reads the epoch from the file name
+        _require_file(a.load, "--load")
+        start_epoch = int(Path(a.load).name.split(".")[1]) + 1
+        # The checkpoint is loaded into the network made from the arguments.
+        trained = json.loads((outdir / "config.yaml").read_text())["model_args"]
+        if trained != config["model_args"]:
+            raise CommandFailed(
+                "Error(s) in loading state_dict for HetOnlyVAE: size mismatch "
+                f"(trained: {trained}, given: {config['model_args']})"
+            )
+        if start_epoch > a.num_epochs:
+            raise CommandFailed(
+                f"The number of epochs to train must be greater than {a.num_epochs}!"
+            )
     (outdir / "config.yaml").write_text(json.dumps(config, indent=2))
 
     n_particles = len(_particles_of_tilt_star(a.particles))
     if a.ind is not None:
         n_particles = len(_load_pkl(a.ind))
     rng = np.random.default_rng(0)
-    # run.log has bare messages (no formatter on the FileHandler of train_vae)
-    with open(outdir / "run.log", "w") as log:
+    # run.log has bare messages (no formatter on the FileHandler of train_vae), and the
+    # FileHandler appends to it.
+    with open(outdir / "run.log", "a") as log:
         log.write("cryodrgn train_vae ...\ncryoDRGN 3.5.0\n")
-        for epoch in range(1, a.num_epochs + 1):  # epochs are counted from 1
+        for epoch in range(start_epoch, a.num_epochs + 1):  # counted from 1
             gen, kld = 1.0 / epoch, 0.1 + 0.01 * epoch
             log.write(
                 f"# [Train Epoch: {epoch}/{a.num_epochs}] [{n_particles}/{n_particles} "
@@ -364,6 +408,9 @@ def _train_vae_run(a: argparse.Namespace, fake: FakeCryoDRGN) -> None:
             _save_pkl(anlzdir / "umap.pkl", rng.normal(size=(n_particles, 2)))
         labels = np.arange(n_particles) % 20
         _save_pkl(anlzdir / "kmeans20" / "labels.pkl", labels)
+        # rows of z closest to the k-means centers
+        centers_ind = np.unique(labels, return_index=True)[1]
+        np.savetxt(anlzdir / "kmeans20" / "centers_ind.txt", centers_ind, fmt="%d")
         # volumes (eval_vol: vol_001.mrc, ... 1-based), --pc 2 --n-per-pc 10
         for i in (1, 2):
             _write_volumes(anlzdir / f"pc{i}", 10)
@@ -492,6 +539,83 @@ def _filter_star_run(a: argparse.Namespace, fake: FakeCryoDRGN) -> None:
     _write_cryodrgn_star(a.o, filtered, optics)
 
 
+# --- cryodrgn graph_traversal ----------------------------------------------------
+
+
+def _graph_traversal_parser() -> _Parser:
+    p = _Parser(prog="cryodrgn graph_traversal", add_help=False)
+    p.add_argument("zfile")
+    p.add_argument("--anchors", required=True, nargs="+")
+    p.add_argument("--max-neighbors", type=int, default=10)
+    p.add_argument("--avg-neighbors", type=float, default=5)
+    p.add_argument("--batch-size", type=int, default=1000)
+    p.add_argument("--outtxt", "-o", type=os.path.abspath, default="z-path.txt")
+    p.add_argument("--outind", type=os.path.abspath, default="z-path-indices.txt")
+    p.add_argument("--verbose", action="store_true")
+    return p
+
+
+def _graph_traversal_run(a: argparse.Namespace, fake: FakeCryoDRGN) -> None:
+    _require_file(a.zfile, "z file")
+    z = np.asarray(_load_pkl(a.zfile))  # the first pickle: z_mu
+    anchors = [int(x) for x in a.anchors]
+    if any(i < 0 or i >= len(z) for i in anchors):
+        raise CommandFailed("anchor index out of the z file")
+    # a path through each anchor, with one particle between consecutive anchors
+    path = [anchors[0]]
+    for prev, nxt in itertools.pairwise(anchors):
+        path += [(prev + nxt) // 2, nxt]
+    np.savetxt(a.outtxt, z[path])
+    np.savetxt(a.outind, path, fmt="%d")
+
+
+# --- cryodrgn eval_vol ------------------------------------------------------------
+
+
+def _eval_vol_parser() -> _Parser:
+    p = _Parser(prog="cryodrgn eval_vol", add_help=False)
+    p.add_argument("weights")
+    p.add_argument("-c", "--config", required=True)
+    p.add_argument("-o", type=os.path.abspath, required=True)
+    p.add_argument("--device", type=int)
+    p.add_argument("--prefix", default="vol_")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("-z", type=float, nargs="*")
+    p.add_argument("--z-start", type=float, nargs="*")
+    p.add_argument("--z-end", type=float, nargs="*")
+    p.add_argument("-n", type=int, default=10)
+    p.add_argument("--zfile")
+    p.add_argument("--Apix", type=float, default=1)
+    p.add_argument("--flip", action="store_true")
+    p.add_argument("--invert", action="store_true")
+    p.add_argument("-d", "--downsample", type=int)
+    p.add_argument("--low-pass", type=float)
+    p.add_argument("--crop", type=int)
+    p.add_argument("--vol-start-index", type=int, default=1)
+    return p
+
+
+def _eval_vol_run(a: argparse.Namespace, fake: FakeCryoDRGN) -> None:
+    _require_file(a.weights, "weights")
+    _require_file(a.config, "--config")
+    if a.zfile is None:
+        raise CLIError("cryodrgn eval_vol: only --zfile is emulated")
+    _require_file(a.zfile, "--zfile")
+    if a.downsample is not None and a.downsample % 2 != 0:
+        raise CommandFailed("Boxsize must be even")
+    z = np.loadtxt(a.zfile, ndmin=2)
+    box = (a.downsample or 8) + 1  # lattice D = image size + 1
+    zz, yy, xx = np.mgrid[:box, :box, :box] - box // 2
+    Path(a.o).mkdir(parents=True, exist_ok=True)
+    for i, _ in enumerate(z, start=a.vol_start_index):
+        vol = np.exp(-(xx**2 + yy**2 + zz**2) / (2.0 + i)).astype(np.float32)
+        if a.invert:
+            vol *= -1
+        with mrcfile.new(Path(a.o) / f"{a.prefix}{i:03d}.mrc", overwrite=True) as mrc:
+            mrc.set_data(vol)
+            mrc.voxel_size = a.Apix
+
+
 _COMMANDS: dict[tuple[str, str], tuple[Callable[[], _Parser], Callable]] = {
     ("cryodrgn_utils", "parse_relion"): (_parse_relion_parser, _parse_relion_run),
     ("cryodrgn", "parse_star"): (_parse_star_parser, _parse_star_run),
@@ -503,7 +627,13 @@ _COMMANDS: dict[tuple[str, str], tuple[Callable[[], _Parser], Callable]] = {
     ("cryodrgn", "train_vae"): (_train_vae_parser, _train_vae_run),
     ("cryodrgn", "filter"): (_filter_parser, _filter_run),
     ("cryodrgn_utils", "filter_star"): (_filter_star_parser, _filter_star_run),
+    ("cryodrgn", "graph_traversal"): (_graph_traversal_parser, _graph_traversal_run),
+    ("cryodrgn", "eval_vol"): (_eval_vol_parser, _eval_vol_run),
 }
+
+
+def outdir_key(path) -> str:
+    return Path(path).name
 
 
 @dataclass
@@ -520,6 +650,8 @@ class FakeCryoDRGN:
     errors: list[str] = field(default_factory=list)
     """Messages of the commands that failed (`CommandFailed`)."""
     envs: list[dict[str, str] | None] = field(default_factory=list)
+    backprojected: dict[str, list[int]] = field(default_factory=dict)
+    """Particles back-projected with --ind, by output directory name."""
     """`env` passed to each call (None: inherited from the current process)."""
 
     def __call__(self, cmd, *args, check: bool = False, env=None, **kwargs):
