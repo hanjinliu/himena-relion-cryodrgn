@@ -38,6 +38,37 @@ def test_read_particle_image_params(relion_project: RelionProject):
     assert params.pixel_size == pytest.approx(relion_project.image_pixel_size)
 
 
+def _write_optics_star(path, premultiplied: list[int] | None) -> None:
+    """particles.star with one optics group per value of rlnCtfDataAreCtfPremultiplied
+    (no such column if None)."""
+    if premultiplied is None:
+        columns, rows = ["_rlnOpticsGroup #1"], ["1"]
+    else:
+        columns = ["_rlnOpticsGroup #1", "_rlnCtfDataAreCtfPremultiplied #2"]
+        rows = [f"{i + 1} {flag}" for i, flag in enumerate(premultiplied)]
+    path.write_text(
+        "data_optics\n\nloop_\n" + "\n".join(columns + rows) + "\n\n"
+        "data_particles\n\nloop_\n_rlnOpticsGroup #1\n1\n"
+    )
+
+
+@pytest.mark.parametrize("premultiplied", [None, [0], [0, 0]])
+def test_check_not_ctf_premultiplied(tmp_path, premultiplied):
+    star = tmp_path / "particles.star"
+    _write_optics_star(star, premultiplied)
+
+    _impl.check_not_ctf_premultiplied(star)  # does not raise
+
+
+@pytest.mark.parametrize("premultiplied", [[1], [0, 1]])
+def test_check_ctf_premultiplied_fails(tmp_path, premultiplied):
+    star = tmp_path / "particles.star"
+    _write_optics_star(star, premultiplied)
+
+    with pytest.raises(ValueError, match="--no_ctf"):
+        _impl.check_not_ctf_premultiplied(star)
+
+
 def test_backproject_without_tilt(tmp_path, fake_cryodrgn: FakeCryoDRGN):
     for name in ["particles.star", "ctf.pkl", "poses.pkl"]:
         (tmp_path / name).touch()

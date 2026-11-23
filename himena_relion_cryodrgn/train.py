@@ -183,6 +183,7 @@ class CryoDrgnTrainJob(_CryoDrgnJob):
         architecture = _impl.VaeArchitecture(
             zdim, enc_layers, enc_dim, dec_layers, dec_dim
         )
+        _impl.check_not_ctf_premultiplied(in_parts)
         image = _impl.read_particle_image_params(in_parts)
         if box_size > image.box_size:
             raise ValueError(
@@ -282,6 +283,8 @@ class CryoDrgnTrainContinue(_CryoDrgnJob, RelionExternalContinue):
         architecture = _impl.VaeArchitecture(
             zdim, enc_layers, enc_dim, dec_layers, dec_dim
         )
+        # a job trained before this check was added may have premultiplied images
+        _impl.check_not_ctf_premultiplied(in_parts)
         job_dir = self.output_job_dir.path
         workdir = job_dir / "train"
         last_epoch = _analysis.last_checkpoint_epoch(workdir)

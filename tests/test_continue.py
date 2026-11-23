@@ -100,6 +100,19 @@ def test_continue_without_checkpoint(
     assert fake_cryodrgn.calls == []
 
 
+def test_continue_with_ctf_premultiplied_particles(
+    trained_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
+):
+    # e.g. a job trained before the check was added to CryoDRGN Train
+    trained_project.set_ctf_premultiplied()
+
+    with pytest.raises(ValueError, match="CTF-premultiplied"):
+        _continue_job(trained_project, n_epochs=30)
+
+    assert fake_cryodrgn.calls == []
+    assert trained_project.job_file("RELION_JOB_EXIT_FAILURE").exists()
+
+
 def test_continue_with_the_same_network(
     relion_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
 ):

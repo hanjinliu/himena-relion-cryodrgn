@@ -143,70 +143,83 @@ def test_train_widget_shows_latent_during_training(
 
 def test_train_widget_latent_of_earlier_epoch(qtbot, trained_project: RelionProject):
     widget = _train_widget(qtbot, trained_project)
-    spin = widget._latent_epoch
-    assert not widget._latent_epoch_row.isHidden()
-    assert spin.epochs() == list(range(1, 21))
-    assert spin.value() == 20
+    choice = widget._latent_epoch
+    assert not choice.isHidden()
+    assert choice.choices() == list(range(1, 21))
+    assert choice.value() == 20
 
     # no analysis of epoch 5: the PCA of z.5.pkl, without the k-means clusters
-    spin.setValue(5)
+    choice.setValue(5)
     assert "epoch 5, PCA of z" in widget._latent_title.text()
     (scatter,) = _scatters(widget._latent_canvas)
     assert len(scatter.get_offsets()) == 4
 
-    spin.stepBy(15)
+    choice.setValue(20)
     assert "epoch 20, UMAP, 4 k-means clusters" in widget._latent_title.text()
     assert len(_scatters(widget._latent_canvas)) == 4
 
 
-def test_epoch_spinbox_steps_through_checkpoints(qtbot, trained_project: RelionProject):
+def test_epoch_choice_steps_through_checkpoints(qtbot, trained_project: RelionProject):
     """Only the epochs with z.{epoch}.pkl, e.g. with `--checkpoint 5`."""
     for epoch in range(1, 21):
         if epoch % 5:
             trained_project.job_file("train", f"z.{epoch}.pkl").unlink()
     widget = _train_widget(qtbot, trained_project)
-    spin = widget._latent_epoch
-    assert spin.epochs() == [5, 10, 15, 20]
+    choice = widget._latent_epoch
+    assert choice.choices() == [5, 10, 15, 20]
 
-    spin.stepBy(-1)
-    assert spin.value() == 15
+    choice._left_btn.click()
+    assert choice.value() == 15
     assert "epoch 15, PCA of z" in widget._latent_title.text()
-    spin.stepBy(-5)
-    assert spin.value() == 5
-    spin.setValue(12)  # typed: the nearest epoch with z.{epoch}.pkl
-    assert spin.value() == 10
+    choice._left_btn.click()
+    choice._left_btn.click()
+    assert choice.value() == 5
+    choice.setValue(12)  # the next epoch with z.{epoch}.pkl, from the current one
+    assert choice.value() == 10
     assert "epoch 10, PCA of z" in widget._latent_title.text()
 
 
-def test_epoch_spinbox_follows_training(qtbot, relion_project: RelionProject):
+def test_epoch_choice_follows_training(qtbot, relion_project: RelionProject):
     from fake_cryodrgn import _save_z
 
     widget = _train_widget(qtbot, relion_project)
-    assert widget._latent_epoch_row.isHidden()
+    choice = widget._latent_epoch
+    assert choice.isHidden()
     train = relion_project.job_file("train")
     train.mkdir()
     rng = np.random.default_rng(0)
+    plotted = []
+    plot_latent = widget._latent_canvas.plot_latent
+    widget._latent_canvas.plot_latent = lambda emb, **kw: (
+        plotted.append(emb.epoch) or plot_latent(emb, **kw)
+    )
 
     def _write_epoch(epoch: int):
         _save_z(train / f"z.{epoch}.pkl", rng.normal(size=(4, 8)))
+        plotted.clear()
         widget.on_job_files_updated(widget._job_dir, [train / f"z.{epoch}.pkl"])
 
     _write_epoch(1)
     _write_epoch(2)
-    assert not widget._latent_epoch_row.isHidden()
-    assert widget._latent_epoch.value() == 2  # the last epoch is followed
+    assert not choice.isHidden()
+    assert choice.value() == 2  # the last epoch is followed
     assert "epoch 2, PCA of z" in widget._latent_title.text()
+    assert plotted == [2]  # once
 
-    widget._latent_epoch.setValue(1)
+    choice.setValue(1)
     _write_epoch(3)
-    assert widget._latent_epoch.epochs() == [1, 2, 3]
-    assert widget._latent_epoch.value() == 1  # the chosen epoch is kept
+    assert choice.choices() == [1, 2, 3]
+    assert choice.value() == 1  # the chosen epoch is kept
     assert "epoch 1, PCA of z" in widget._latent_title.text()
+    assert plotted == [1]
 
-    widget._latent_epoch.setValue(3)
+    choice._right_btn.click()
+    choice._right_btn.click()
+    assert choice.value() == 3
     _write_epoch(4)
-    assert widget._latent_epoch.value() == 4
+    assert choice.value() == 4
     assert "epoch 4, PCA of z" in widget._latent_title.text()
+    assert plotted == [4]
 
 
 def _write_select_job_star(project: RelionProject) -> None:

@@ -80,6 +80,30 @@ def read_particle_image_params(particles_star_path) -> ParticleImageParams:
     )
 
 
+def check_not_ctf_premultiplied(particles_star_path) -> None:
+    """Raise `ValueError` if the particle images are CTF-premultiplied.
+
+    `relion_tomo_subtomo --stack2d` multiplies the images by the CTF and the dose
+    weights unless `--no_ctf` is given, and sets `rlnCtfDataAreCtfPremultiplied`
+    in the optics block. cryoDRGN applies the CTF and the dose filter itself, and
+    `cryodrgn_utils parse_relion` ignores this flag, so they would be applied twice:
+    the CTF phase flips come back in the back-projection and in the trained volumes.
+    """
+    star = read_star(particles_star_path)
+    optics = star["optics"].trust_loop().to_polars()
+    column = "rlnCtfDataAreCtfPremultiplied"
+    if column not in optics.columns:
+        return
+    if (optics[column].cast(int) != 0).any():
+        raise ValueError(
+            f"The particle images of {particles_star_path} are CTF-premultiplied "
+            f"({column} = 1). cryoDRGN applies the CTF to the images itself, so the "
+            "CTF would be applied twice. Extract the particles again as 2D stacks "
+            "without CTF premultiplication: add `--no_ctf` to the additional "
+            "arguments of the Extract subtomos job."
+        )
+
+
 @dataclass
 class ParseRelionOutput:
     particles_file: str

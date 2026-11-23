@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import bisect
 import logging
 from collections.abc import Iterable
 from pathlib import Path
@@ -11,7 +10,12 @@ import numpy as np
 from himena import StandardType, WidgetDataModel
 from himena.standards import plotting as hplt
 from himena_relion import _job_dir
-from himena_relion._widgets import Q3DViewer, QPlotCanvas, spacer_widget
+from himena_relion._widgets import (
+    Q3DViewer,
+    QIntChoiceWidget,
+    QPlotCanvas,
+    spacer_widget,
+)
 from himena_relion._widgets._shared.resizer import QResizer
 from matplotlib import colormaps
 from matplotlib.colors import to_hex
@@ -147,64 +151,6 @@ class QCryoDrgnPlotCanvas(QPlotCanvas):
         self._show(fig)
 
 
-class QEpochSpinBox(QtW.QSpinBox):
-    """Spin box of the epochs with z.{epoch}.pkl, which may not be every epoch.
-
-    The arrows (and the mouse wheel) step to the previous/next of these epochs, and
-    a typed epoch without z.{epoch}.pkl is replaced by the nearest one.
-    """
-
-    epoch_changed = QtCore.Signal(int)
-
-    def __init__(self):
-        super().__init__()
-        self._epochs: list[int] = []
-        self.setKeyboardTracking(False)  # plot the typed epoch, not each digit
-        self.setMinimumWidth(60)
-        self.setToolTip("Epoch of the latent space (train/z.{epoch}.pkl)")
-        self.valueChanged.connect(self._on_value_changed)
-
-    def epochs(self) -> list[int]:
-        return list(self._epochs)
-
-    def set_epochs(self, epochs: list[int]) -> None:
-        """Set the epochs without emitting `epoch_changed`.
-
-        The last epoch is shown if it was shown (new epochs are followed during the
-        training), otherwise the epoch chosen is kept.
-        """
-        follow = not self._epochs or self.value() == self._epochs[-1]
-        self._epochs = sorted(epochs)
-        with QtCore.QSignalBlocker(self):
-            if self._epochs:
-                self.setRange(self._epochs[0], self._epochs[-1])
-                value = self._epochs[-1] if follow else self._nearest(self.value())
-                self.setValue(value)
-            else:
-                self.setRange(0, 0)
-
-    def _nearest(self, value: int) -> int:
-        return min(self._epochs, key=lambda e: abs(e - value))
-
-    def stepBy(self, steps: int) -> None:
-        if not self._epochs:
-            return
-        value = self.value()
-        if steps > 0:
-            index = bisect.bisect_right(self._epochs, value) - 1 + steps
-        else:
-            index = bisect.bisect_left(self._epochs, value) + steps
-        self.setValue(self._epochs[min(max(index, 0), len(self._epochs) - 1)])
-
-    def _on_value_changed(self, value: int) -> None:
-        if not self._epochs:
-            return
-        if (epoch := self._nearest(value)) != value:
-            self.setValue(epoch)  # emits valueChanged again
-        else:
-            self.epoch_changed.emit(epoch)
-
-
 class QVolumeSeriesViewer(QtW.QWidget):
     """Choose a volume series and a volume of it. Only the shown volume is read."""
 
@@ -317,16 +263,12 @@ class QCryoDrgnTrainViewer(QtW.QWidget):
         self._kld_canvas = QCryoDrgnPlotCanvas(self)
         self._latent_title = _title("Latent space")
         self._latent_canvas = QCryoDrgnPlotCanvas.for_scatter(self)
-        # the epoch of the latent space, the last one unless another one is chosen
-        self._latent_epoch = QEpochSpinBox()
-        self._latent_epoch.epoch_changed.connect(self._plot_latent)
-        self._latent_epoch_row = QtW.QWidget()
-        row_layout = QtW.QHBoxLayout(self._latent_epoch_row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.addWidget(QtW.QLabel("Epoch:"))
-        row_layout.addWidget(self._latent_epoch)
-        row_layout.addStretch()
-        self._latent_epoch_row.setVisible(False)
+        # the epoch of the latent space (epochs with train/z.{epoch}.pkl), the last
+        # one unless another one is chosen
+        self._latent_epoch = QIntChoiceWidget("Epoch", label_width=50)
+        self._latent_epoch.setMaximumWidth(200)
+        self._latent_epoch.current_changed.connect(self._plot_latent)
+        self._latent_epoch.setVisible(False)
         # the back-projection and the volume series of the analysis (along each
         # principal component and at the k-means centers)
         self._volumes = QVolumeSeriesViewer()
@@ -339,7 +281,7 @@ class QCryoDrgnTrainViewer(QtW.QWidget):
         layout.addWidget(_title("KL divergence"))
         layout.addWidget(self._kld_canvas)
         layout.addWidget(self._latent_title)
-        layout.addWidget(self._latent_epoch_row)
+        layout.addWidget(self._latent_epoch)
         layout.addWidget(self._latent_canvas)
         layout.addWidget(_title("Volumes"))
         layout.addWidget(self._volumes)
@@ -423,11 +365,24 @@ class QCryoDrgnTrainViewer(QtW.QWidget):
         return text
 
     def _update_latent(self):
-        """Update the epochs to choose from, and plot the chosen one."""
+        """Update the epochs to choose from, and plot the chosen one.
+
+        New epochs are followed during the training if the last epoch was shown,
+        otherwise the epoch chosen is kept.
+        """
+        choice = self._latent_epoch
         epochs = _analysis.latent_epochs(self._workdir)
-        self._latent_epoch.set_epochs(epochs)
-        self._latent_epoch_row.setVisible(bool(epochs))
-        self._plot_latent(self._latent_epoch.value() if epochs else -1)
+        choice.setVisible(bool(epochs))
+        if (old := choice.choices()) != epochs:
+            current = choice.value()
+            keep = bool(old) and current != old[-1] and current in epochs
+            # set_choices shows the last epoch: plot only once, below
+            with QtCore.QSignalBlocker(choice):
+                choice.set_choices(epochs)
+            if keep:
+                choice.setValue(current)  # plotted by current_changed
+                return
+        self._plot_latent(choice.value() if epochs else -1)
 
     def _plot_latent(self, epoch: int):
         try:

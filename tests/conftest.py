@@ -34,6 +34,18 @@ PARTICLES = [
 N_TILTS = 12
 
 
+def _optics_row(ctf_premultiplied: int) -> str:
+    """The optics group of Extract/job010/particles.star.
+
+    `relion_tomo_subtomo --stack2d` sets rlnCtfDataAreCtfPremultiplied to 0 only with
+    `--no_ctf`, the extraction cryoDRGN needs.
+    """
+    return (
+        f"1 opticsGroup1 {IMAGE_PIXEL_SIZE} {IMAGE_SIZE} 300.0 2.7 0.1 "
+        f"{ctf_premultiplied}\n"
+    )
+
+
 def _job_pipeline(process: str, inputs: list[tuple[str, str]]) -> str:
     """job_pipeline.star of a running job, as written by RELION."""
     nodes = "\n".join(f"{path} {label}            1" for path, label in inputs)
@@ -69,6 +81,13 @@ class RelionProject:
 
     def select_job_file(self, *parts: str) -> Path:
         return self.root / self.select_job_dir / Path(*parts)
+
+    def set_ctf_premultiplied(self) -> None:
+        """Mark the particles as extracted without `--no_ctf` (CTF-premultiplied)."""
+        path = self.root / self.particles_star
+        text = path.read_text()
+        assert _optics_row(0) in text
+        path.write_text(text.replace(_optics_row(0), _optics_row(1)))
 
 
 @pytest.fixture
@@ -110,8 +129,8 @@ def relion_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RelionPro
         "# version 50001\n\ndata_optics\n\nloop_\n"
         "_rlnOpticsGroup #1\n_rlnOpticsGroupName #2\n_rlnImagePixelSize #3\n"
         "_rlnImageSize #4\n_rlnVoltage #5\n_rlnSphericalAberration #6\n"
-        "_rlnAmplitudeContrast #7\n"
-        f"1 opticsGroup1 {IMAGE_PIXEL_SIZE} {IMAGE_SIZE} 300.0 2.7 0.1\n\n\n"
+        "_rlnAmplitudeContrast #7\n_rlnCtfDataAreCtfPremultiplied #8\n"
+        f"{_optics_row(0)}\n\n"
         "# version 50001\n\ndata_particles\n\nloop_\n"
         "_rlnTomoName #1\n_rlnTomoParticleName #2\n_rlnImageName #3\n"
         "_rlnOpticsGroup #4\n_rlnTomoVisibleFrames #5\n"

@@ -187,6 +187,19 @@ def test_box_size_larger_than_particles_fails(
     assert relion_project.job_file("RELION_JOB_EXIT_FAILURE").exists()
 
 
+def test_ctf_premultiplied_particles_fail(
+    relion_project: RelionProject, fake_cryodrgn: FakeCryoDRGN
+):
+    # cryoDRGN applies the CTF itself: it would be applied twice
+    relion_project.set_ctf_premultiplied()
+
+    with pytest.raises(ValueError, match="CTF-premultiplied"):
+        _run_job(relion_project)
+
+    assert fake_cryodrgn.calls == []
+    assert relion_project.job_file("RELION_JOB_EXIT_FAILURE").exists()
+
+
 def test_output_nodes_exist(relion_project: RelionProject, fake_cryodrgn: FakeCryoDRGN):
     _run_job(relion_project)
 
