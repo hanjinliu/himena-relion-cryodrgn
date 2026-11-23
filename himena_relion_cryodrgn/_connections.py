@@ -1,7 +1,8 @@
 """Suggest the next job from a job window, with its inputs filled in (`connect_jobs`).
 
     Extract subtomos ──> CryoDRGN Train ──> CryoDRGN Select Particles ──> Extract subtomos
-                             ^                     |
+                             ^   |                 |
+                             |   └──> Subset selection (k-means clusters as classes)
                              └────── retrain ──────┘
 
 "Continue - CryoDRGN Train" and "Graph Traversal - CryoDRGN Train" are suggested from
@@ -18,9 +19,11 @@ from himena_relion._job_class import connect_jobs, parse_string
 from himena_relion._job_dir import ExternalJobDirectory, JobDirectory
 from himena_relion._utils import unwrap_annotated
 from himena_relion.external import RelionExternalJob
+from himena_relion.relion5 import _builtins as _spa
 from himena_relion.relion5_tomo import _builtins as _tomo
 from himena_relion.schemas import OptimisationSetModel
 
+from himena_relion_cryodrgn import _kmeans_classes
 from himena_relion_cryodrgn.select_particles import (
     CryoDrgnSelectParticlesJob,
     TrainJobFiles,
@@ -138,6 +141,14 @@ connect_jobs(
         _param_of(CryoDrgnTrainJob, "dose_per_tilt"): "dose_per_tilt",
         _param_of(CryoDrgnTrainJob, "lazy"): "lazy",
     },
+)
+
+# select k-means clusters in the window of the interactive class selection. Its
+# particles.star goes to Extract subtomos etc. by the connections of himena-relion.
+connect_jobs(
+    CryoDrgnTrainJob,
+    _spa.SelectClassesInteractiveJob,
+    node_mapping={_kmeans_classes.OPTIMISER_STAR: "fn_model"},
 )
 
 # retrain on the selected particles

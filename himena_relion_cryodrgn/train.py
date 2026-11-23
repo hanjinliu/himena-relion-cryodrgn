@@ -3,7 +3,7 @@ from typing import Annotated
 
 from himena_relion.external import RelionExternalContinue
 
-from himena_relion_cryodrgn import _analysis, _impl
+from himena_relion_cryodrgn import _analysis, _impl, _kmeans_classes
 from himena_relion_cryodrgn._job_base import CRYODRGN_BIN_DIR, _CryoDrgnJob
 
 BOX_SIZE = Annotated[
@@ -124,6 +124,26 @@ def _link_outputs(job_dir: Path, particles_star: Path, in_parts) -> None:
     (job_dir / "particles.star").write_bytes(Path(in_parts).read_bytes())
 
 
+def _write_kmeans_classes(job: _CryoDrgnJob, in_parts) -> None:
+    """Write the k-means clusters of the latest analysis as classes, to select them
+    in the "Subset selection" job (see `_kmeans_classes`)."""
+    from himena_relion_cryodrgn.select_particles import TrainJobFiles
+
+    job_dir = job.output_job_dir
+    train = TrainJobFiles.for_job(job_dir.path, in_parts)
+    result = _kmeans_classes.write_kmeans_classes(train, job_dir.relion_project_dir)
+    if result is None:
+        job.console.log(
+            f"No k-means clusters with volumes: {_kmeans_classes.OPTIMISER_STAR} is "
+            "not written."
+        )
+    else:
+        job.console.log(
+            f"k-means clusters (k={result.k}, epoch {result.epoch}) are written to "
+            f"{_kmeans_classes.OPTIMISER_STAR}, to select them in Subset selection."
+        )
+
+
 class CryoDrgnTrainJob(_CryoDrgnJob):
     @classmethod
     def job_title(cls):
@@ -135,6 +155,8 @@ class CryoDrgnTrainJob(_CryoDrgnJob):
             ("particles.star", "ParticleGroupMetadata.star"),
             # back-projection of all the training particles, e.g. a 3D reference
             (_impl.BACKPROJECTION, "DensityMap.mrc"),
+            # the k-means clusters as classes, for Subset selection
+            (_kmeans_classes.OPTIMISER_STAR, "OptimiserData.star.cryodrgn"),
         ]
 
     def provide_widget(self, job_dir):
@@ -219,6 +241,7 @@ class CryoDrgnTrainJob(_CryoDrgnJob):
         )
         yield
         _link_outputs(job_dir, particles_star, in_parts)
+        _write_kmeans_classes(self, in_parts)
 
 
 class CryoDrgnTrainContinue(_CryoDrgnJob, RelionExternalContinue):
@@ -294,3 +317,4 @@ class CryoDrgnTrainContinue(_CryoDrgnJob, RelionExternalContinue):
         )
         yield
         _link_outputs(job_dir, particles_star, in_parts)
+        _write_kmeans_classes(self, in_parts)

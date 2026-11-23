@@ -83,6 +83,9 @@ def test_train_widget_after_training(qtbot, trained_project: RelionProject):
     assert len(_scatters(widget._latent_canvas)) == 4
     n_points = sum(len(c.get_offsets()) for c in _scatters(widget._latent_canvas))
     assert n_points == 4  # training particles (TS_01/2 and TS_01/4 excluded)
+    # the class numbers of Subset selection (k-means label + 1 = volume number)
+    texts = widget._latent_canvas.figure.axes[0].texts
+    assert sorted(t.get_text() for t in texts) == ["1", "2", "3", "4"]
     assert widget._volumes._viewer.has_image  # back-projection
     widget.widget_added_callback()
 

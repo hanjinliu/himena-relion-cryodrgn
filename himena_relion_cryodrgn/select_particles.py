@@ -95,14 +95,22 @@ class TrainJobFiles:
             getattr(job_cls, "original_class", None) is not CryoDrgnTrainJob
         ):
             raise ValueError(f"{job_path} is not a {CryoDrgnTrainJob.job_title()} job.")
+        return cls.for_job(
+            job_dir.path, job_dir.resolve_path(job_dir.get_job_param("in_part"))
+        )
+
+    @classmethod
+    def for_job(cls, job_path, particles_star) -> "TrainJobFiles":
+        """Files of the CryoDRGN Train job in `job_path`, trained on `particles_star`."""
+        job_path = Path(job_path)
         ntilts = _impl.DEFAULT_NTILTS
         return cls(
-            job_path=job_dir.path,
-            workdir=job_dir.path / "train",
-            particles_parsed_star=job_dir.path / _impl.PARSED_PARTICLES,
-            particles_star=job_dir.resolve_path(job_dir.get_job_param("in_part")),
+            job_path=job_path,
+            workdir=job_path / "train",
+            particles_parsed_star=job_path / _impl.PARSED_PARTICLES,
+            particles_star=Path(particles_star),
             training_indices=(
-                job_dir.path / "backproject" / f"indices_force_ntilts_{ntilts}.pkl"
+                job_path / "backproject" / f"indices_force_ntilts_{ntilts}.pkl"
             ),
         )
 

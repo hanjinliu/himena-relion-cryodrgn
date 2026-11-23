@@ -301,6 +301,8 @@ def test_output_nodes_are_registered(
         "External/job011/particles.star": "ParticleGroupMetadata.star",
         # the back-projection of all the training particles (a 3D reference)
         "External/job011/backproject/backproject.mrc": "DensityMap.mrc",
+        # the k-means clusters as classes, for Subset selection
+        "External/job011/kmeans_optimiser.star": "OptimiserData.star.cryodrgn",
     }
     assert relion_project.job_file("backproject", "backproject.mrc").exists()
 

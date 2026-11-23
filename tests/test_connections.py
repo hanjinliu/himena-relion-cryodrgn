@@ -17,6 +17,7 @@ from himena.workflow import LocalReaderMethod
 from himena_relion import _job_class
 from himena_relion._job_class import CONNECTED_JOBS, _node_mapping_to_context
 from himena_relion.external import run_function
+from himena_relion.relion5 import _builtins as _spa
 from himena_relion.relion5_tomo import _builtins as _tomo
 
 from himena_relion_cryodrgn import _connections
@@ -111,6 +112,7 @@ def test_connections_are_registered(connections):
     expected = {
         (_tomo.ExtractParticlesTomoJob, CryoDrgnTrainJob),
         (CryoDrgnTrainJob, CryoDrgnSelectParticlesJob),
+        (CryoDrgnTrainJob, _spa.SelectClassesInteractiveJob),
         (CryoDrgnSelectParticlesJob, CryoDrgnTrainJob),
         (CryoDrgnSelectParticlesJob, _tomo.ExtractParticlesTomoJob),
     }
@@ -153,6 +155,17 @@ def test_train_to_select(connections, relion_project: RelionProject):
         "dose_per_tilt": 2.5,
         "lazy": False,  # "No" in job.star (bool("No") is True)
     }
+
+
+def test_train_to_subset_selection(connections, relion_project: RelionProject):
+    """The k-means clusters are selected in the interactive class selection."""
+    params = _suggested(
+        connections,
+        relion_project.root / relion_project.job_dir,
+        CryoDrgnTrainJob,
+        _spa.SelectClassesInteractiveJob,
+    )
+    assert params == {"fn_model": "External/job011/kmeans_optimiser.star"}
 
 
 def test_train_to_select_defaults(connections, relion_project: RelionProject):

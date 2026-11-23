@@ -423,8 +423,8 @@ def cryodrgn_filter(
     return out
 
 
-def particle_indices_to_star_rows(parsed_star, particle_indices) -> np.ndarray:
-    """Convert cryoDRGN particle indices to row indices of the RELION particles.star.
+def particle_star_rows(parsed_star) -> np.ndarray:
+    """Row index of the RELION particles.star of each cryoDRGN particle.
 
     For tilt series, cryoDRGN numbers the particles in the order of first appearance
     of `rlnGroupName` in the star file written by `cryodrgn_utils parse_relion`.
@@ -432,8 +432,7 @@ def particle_indices_to_star_rows(parsed_star, particle_indices) -> np.ndarray:
     can differ from the rows of the original particles.star. parse_relion also writes
     `rlnOriginalParticle` (1-based row in particles.star), which links the two.
 
-    Returns sorted unique row indices, so that the particle order of particles.star
-    is kept.
+    The returned array is indexed by the cryoDRGN particle index.
     """
     df = read_star(parsed_star).first().trust_loop().to_polars()
     for column in ("rlnGroupName", "rlnOriginalParticle"):
@@ -443,7 +442,16 @@ def particle_indices_to_star_rows(parsed_star, particle_indices) -> np.ndarray:
                 "`cryodrgn_utils parse_relion`."
             )
     particles = df.unique(subset="rlnGroupName", keep="first", maintain_order=True)
-    rows = particles["rlnOriginalParticle"].to_numpy().astype(int) - 1
+    return particles["rlnOriginalParticle"].to_numpy().astype(int) - 1
+
+
+def particle_indices_to_star_rows(parsed_star, particle_indices) -> np.ndarray:
+    """Convert cryoDRGN particle indices to row indices of the RELION particles.star.
+
+    Returns sorted unique row indices, so that the particle order of particles.star
+    is kept (see `particle_star_rows`).
+    """
+    rows = particle_star_rows(parsed_star)
     particle_indices = np.asarray(particle_indices, dtype=int)
     if particle_indices.size > 0 and (
         particle_indices.min() < 0 or particle_indices.max() >= rows.size

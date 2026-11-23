@@ -116,10 +116,21 @@ class QCryoDrgnPlotCanvas(QPlotCanvas):
             )  # fmt: skip
         elif labels is not None and len(labels) == len(x):
             cmap = colormaps["tab20"]
-            for i, label in enumerate(np.unique(labels)):
+            uniq = np.unique(labels)
+            for i, label in enumerate(uniq):
                 mask = labels == label
                 color = to_hex(cmap(i % cmap.N)) + "c0"
                 self._scatter(fig, x[mask], y[mask], size=size, color=color)
+            # The class numbers of Subset selection, same as the numbers of the
+            # k-means volumes (vol_{label + 1:03d}.mrc), at the median of each cluster
+            light = self._main_theme().is_light_background()
+            fig.text(
+                [float(np.median(x[labels == label])) for label in uniq],
+                [float(np.median(y[labels == label])) for label in uniq],
+                [str(int(label) + 1) for label in uniq],
+                size=9,
+                color="black" if light else "white",
+            )
         else:
             self._scatter(fig, x, y, size=size, color=color_all + "80")
         fig.x.label = emb.xlabel
