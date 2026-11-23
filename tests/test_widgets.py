@@ -109,6 +109,9 @@ def test_learning_curve_updates_with_checkpoints(
 
     assert len(_lines(widget._loss_canvas)[0].get_xdata()) == 3
     assert widget._status.text().startswith("Epoch 3 / 20 finished.")
+    # all the epochs to train: n_epochs is not in this job.star, but in run.log
+    for canvas in (widget._loss_canvas, widget._kld_canvas):
+        assert canvas.figure.axes[0].get_xlim() == pytest.approx((0.85, 20.15))
 
     # run.log changes during an epoch: the plot is not updated
     with open(run_log, "a") as f:
@@ -136,6 +139,74 @@ def test_train_widget_shows_latent_during_training(
 
     assert "epoch 20, PCA of z" in widget._latent_title.text()
     assert len(_scatters(widget._latent_canvas)) == 1
+
+
+def test_train_widget_latent_of_earlier_epoch(qtbot, trained_project: RelionProject):
+    widget = _train_widget(qtbot, trained_project)
+    spin = widget._latent_epoch
+    assert not widget._latent_epoch_row.isHidden()
+    assert spin.epochs() == list(range(1, 21))
+    assert spin.value() == 20
+
+    # no analysis of epoch 5: the PCA of z.5.pkl, without the k-means clusters
+    spin.setValue(5)
+    assert "epoch 5, PCA of z" in widget._latent_title.text()
+    (scatter,) = _scatters(widget._latent_canvas)
+    assert len(scatter.get_offsets()) == 4
+
+    spin.stepBy(15)
+    assert "epoch 20, UMAP, 4 k-means clusters" in widget._latent_title.text()
+    assert len(_scatters(widget._latent_canvas)) == 4
+
+
+def test_epoch_spinbox_steps_through_checkpoints(qtbot, trained_project: RelionProject):
+    """Only the epochs with z.{epoch}.pkl, e.g. with `--checkpoint 5`."""
+    for epoch in range(1, 21):
+        if epoch % 5:
+            trained_project.job_file("train", f"z.{epoch}.pkl").unlink()
+    widget = _train_widget(qtbot, trained_project)
+    spin = widget._latent_epoch
+    assert spin.epochs() == [5, 10, 15, 20]
+
+    spin.stepBy(-1)
+    assert spin.value() == 15
+    assert "epoch 15, PCA of z" in widget._latent_title.text()
+    spin.stepBy(-5)
+    assert spin.value() == 5
+    spin.setValue(12)  # typed: the nearest epoch with z.{epoch}.pkl
+    assert spin.value() == 10
+    assert "epoch 10, PCA of z" in widget._latent_title.text()
+
+
+def test_epoch_spinbox_follows_training(qtbot, relion_project: RelionProject):
+    from fake_cryodrgn import _save_z
+
+    widget = _train_widget(qtbot, relion_project)
+    assert widget._latent_epoch_row.isHidden()
+    train = relion_project.job_file("train")
+    train.mkdir()
+    rng = np.random.default_rng(0)
+
+    def _write_epoch(epoch: int):
+        _save_z(train / f"z.{epoch}.pkl", rng.normal(size=(4, 8)))
+        widget.on_job_files_updated(widget._job_dir, [train / f"z.{epoch}.pkl"])
+
+    _write_epoch(1)
+    _write_epoch(2)
+    assert not widget._latent_epoch_row.isHidden()
+    assert widget._latent_epoch.value() == 2  # the last epoch is followed
+    assert "epoch 2, PCA of z" in widget._latent_title.text()
+
+    widget._latent_epoch.setValue(1)
+    _write_epoch(3)
+    assert widget._latent_epoch.epochs() == [1, 2, 3]
+    assert widget._latent_epoch.value() == 1  # the chosen epoch is kept
+    assert "epoch 1, PCA of z" in widget._latent_title.text()
+
+    widget._latent_epoch.setValue(3)
+    _write_epoch(4)
+    assert widget._latent_epoch.value() == 4
+    assert "epoch 4, PCA of z" in widget._latent_title.text()
 
 
 def _write_select_job_star(project: RelionProject) -> None:
@@ -293,6 +364,8 @@ def test_train_widget_after_continue(
     assert widget._status.text() == "Training complete (30 epochs)."
     total, _ = _lines(widget._loss_canvas)
     assert len(total.get_xdata()) == 30
+    # n_epochs of job.star, the total number of epochs
+    assert widget._loss_canvas.figure.axes[0].get_xlim() == pytest.approx((0.85, 30.15))
     assert "epoch 30" in widget._latent_title.text()
     sources = _volume_sources(widget)
     assert sources[1] == "PC1 (epoch 30)"  # the latest analysis first

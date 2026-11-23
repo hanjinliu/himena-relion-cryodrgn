@@ -100,12 +100,17 @@ def last_checkpoint_epoch(workdir) -> int | None:
     return max(epochs) if epochs else None
 
 
+def latent_epochs(workdir) -> list[int]:
+    """Epochs with z.{epoch}.pkl (saved with the checkpoints), in ascending order."""
+    return sorted(_numbered_files(workdir, _Z))
+
+
 def resolve_epoch(workdir, epoch: int = -1) -> int | None:
     """Resolve epoch -1 to the last epoch with z.{epoch}.pkl, as `cryodrgn filter`."""
     if epoch != -1:
         return epoch
-    epochs = _numbered_files(workdir, _Z)
-    return max(epochs) if epochs else None
+    epochs = latent_epochs(workdir)
+    return epochs[-1] if epochs else None
 
 
 def _load_pkl(path):

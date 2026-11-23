@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import logging
 from collections.abc import Iterable
 from pathlib import Path
@@ -76,22 +77,30 @@ class QCryoDrgnPlotCanvas(QPlotCanvas):
     def _point_size(n: int) -> float:
         return 6.0 if n < 1000 else 3.0 if n < 5000 else 1.5
 
-    def plot_loss(self, log: _analysis.TrainLog) -> None:
+    @staticmethod
+    def _set_epoch_range(fig: hplt.SingleAxes, niters: int | None) -> None:
+        """Show all the epochs to train (unknown: the epochs trained so far)."""
+        if niters:
+            fig.x.lim = (0.85, niters + 0.15)
+
+    def plot_loss(self, log: _analysis.TrainLog, niters: int | None = None) -> None:
         fig = hplt.figure(self._main_theme().background)
         color_total, color_gen = self._colors()
         fig.plot(log.epochs, log.total_loss, name="Total", color=color_total)
         fig.plot(log.epochs, log.gen_loss, name="Reconstruction", color=color_gen)
         fig.x.label = "Epoch"
         fig.y.label = "Loss"
+        self._set_epoch_range(fig, niters)
         # inside the axes, where the decreasing curves leave space
         fig.set_legend(location="top_right", font_size=9.0)
         self._show(fig)
 
-    def plot_kld(self, log: _analysis.TrainLog) -> None:
+    def plot_kld(self, log: _analysis.TrainLog, niters: int | None = None) -> None:
         fig = hplt.figure(self._main_theme().background)
         fig.plot(log.epochs, log.kld, color=self._colors()[1])
         fig.x.label = "Epoch"
         fig.y.label = "KLD"
+        self._set_epoch_range(fig, niters)
         self._show(fig)
 
     def plot_latent(
@@ -136,6 +145,64 @@ class QCryoDrgnPlotCanvas(QPlotCanvas):
         fig.x.label = emb.xlabel
         fig.y.label = emb.ylabel
         self._show(fig)
+
+
+class QEpochSpinBox(QtW.QSpinBox):
+    """Spin box of the epochs with z.{epoch}.pkl, which may not be every epoch.
+
+    The arrows (and the mouse wheel) step to the previous/next of these epochs, and
+    a typed epoch without z.{epoch}.pkl is replaced by the nearest one.
+    """
+
+    epoch_changed = QtCore.Signal(int)
+
+    def __init__(self):
+        super().__init__()
+        self._epochs: list[int] = []
+        self.setKeyboardTracking(False)  # plot the typed epoch, not each digit
+        self.setMinimumWidth(60)
+        self.setToolTip("Epoch of the latent space (train/z.{epoch}.pkl)")
+        self.valueChanged.connect(self._on_value_changed)
+
+    def epochs(self) -> list[int]:
+        return list(self._epochs)
+
+    def set_epochs(self, epochs: list[int]) -> None:
+        """Set the epochs without emitting `epoch_changed`.
+
+        The last epoch is shown if it was shown (new epochs are followed during the
+        training), otherwise the epoch chosen is kept.
+        """
+        follow = not self._epochs or self.value() == self._epochs[-1]
+        self._epochs = sorted(epochs)
+        with QtCore.QSignalBlocker(self):
+            if self._epochs:
+                self.setRange(self._epochs[0], self._epochs[-1])
+                value = self._epochs[-1] if follow else self._nearest(self.value())
+                self.setValue(value)
+            else:
+                self.setRange(0, 0)
+
+    def _nearest(self, value: int) -> int:
+        return min(self._epochs, key=lambda e: abs(e - value))
+
+    def stepBy(self, steps: int) -> None:
+        if not self._epochs:
+            return
+        value = self.value()
+        if steps > 0:
+            index = bisect.bisect_right(self._epochs, value) - 1 + steps
+        else:
+            index = bisect.bisect_left(self._epochs, value) + steps
+        self.setValue(self._epochs[min(max(index, 0), len(self._epochs) - 1)])
+
+    def _on_value_changed(self, value: int) -> None:
+        if not self._epochs:
+            return
+        if (epoch := self._nearest(value)) != value:
+            self.setValue(epoch)  # emits valueChanged again
+        else:
+            self.epoch_changed.emit(epoch)
 
 
 class QVolumeSeriesViewer(QtW.QWidget):
@@ -250,6 +317,16 @@ class QCryoDrgnTrainViewer(QtW.QWidget):
         self._kld_canvas = QCryoDrgnPlotCanvas(self)
         self._latent_title = _title("Latent space")
         self._latent_canvas = QCryoDrgnPlotCanvas.for_scatter(self)
+        # the epoch of the latent space, the last one unless another one is chosen
+        self._latent_epoch = QEpochSpinBox()
+        self._latent_epoch.epoch_changed.connect(self._plot_latent)
+        self._latent_epoch_row = QtW.QWidget()
+        row_layout = QtW.QHBoxLayout(self._latent_epoch_row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(QtW.QLabel("Epoch:"))
+        row_layout.addWidget(self._latent_epoch)
+        row_layout.addStretch()
+        self._latent_epoch_row.setVisible(False)
         # the back-projection and the volume series of the analysis (along each
         # principal component and at the k-means centers)
         self._volumes = QVolumeSeriesViewer()
@@ -262,6 +339,7 @@ class QCryoDrgnTrainViewer(QtW.QWidget):
         layout.addWidget(_title("KL divergence"))
         layout.addWidget(self._kld_canvas)
         layout.addWidget(self._latent_title)
+        layout.addWidget(self._latent_epoch_row)
         layout.addWidget(self._latent_canvas)
         layout.addWidget(_title("Volumes"))
         layout.addWidget(self._volumes)
@@ -317,13 +395,21 @@ class QCryoDrgnTrainViewer(QtW.QWidget):
 
     def _update_learning_curve(self):
         log = _analysis.parse_train_log(self._workdir / "run.log")
+        niters = self._num_epochs(log)
         if log.epochs:
-            self._loss_canvas.plot_loss(log)
-            self._kld_canvas.plot_kld(log)
+            self._loss_canvas.plot_loss(log, niters)
+            self._kld_canvas.plot_kld(log, niters)
         else:
             self._loss_canvas.clear()
             self._kld_canvas.clear()
         self._status.setText(self._status_text(log))
+
+    def _num_epochs(self, log: _analysis.TrainLog) -> int | None:
+        """Number of epochs to train: n_epochs of job.star, otherwise of run.log."""
+        try:
+            return int(self._job_dir.get_job_param("n_epochs"))
+        except (OSError, ValueError):  # no job.star, or n_epochs not in it
+            return log.num_epochs
 
     def _status_text(self, log: _analysis.TrainLog) -> str:
         if log.finished:
@@ -337,10 +423,17 @@ class QCryoDrgnTrainViewer(QtW.QWidget):
         return text
 
     def _update_latent(self):
+        """Update the epochs to choose from, and plot the chosen one."""
+        epochs = _analysis.latent_epochs(self._workdir)
+        self._latent_epoch.set_epochs(epochs)
+        self._latent_epoch_row.setVisible(bool(epochs))
+        self._plot_latent(self._latent_epoch.value() if epochs else -1)
+
+    def _plot_latent(self, epoch: int):
         try:
-            emb = _analysis.load_latent_2d(self._workdir)
-        except Exception:
-            _LOGGER.exception("Failed to load the latent space")
+            emb = _analysis.load_latent_2d(self._workdir, epoch)
+        except Exception:  # e.g. still being written
+            _LOGGER.exception("Failed to load the latent space of epoch %s", epoch)
             emb = None
         if emb is None:
             self._latent_title.setText("<b>&#9679; Latent space</b>")
