@@ -4,7 +4,11 @@ from typing import Annotated
 from himena_relion.external import RelionExternalContinue
 
 from himena_relion_cryodrgn import _analysis, _impl, _kmeans_classes
-from himena_relion_cryodrgn._job_base import CRYODRGN_BIN_DIR, _CryoDrgnJob
+from himena_relion_cryodrgn._job_base import (
+    CRYODRGN_BIN_DIR,
+    GPU_IDS,
+    _CryoDrgnJob,
+)
 
 BOX_SIZE = Annotated[
     int,
@@ -177,9 +181,11 @@ class CryoDrgnTrainJob(_CryoDrgnJob):
         enc_dim: ENC_DIM = _DEFAULT_ARCH.enc_dim,
         dec_layers: DEC_LAYERS = _DEFAULT_ARCH.dec_layers,
         dec_dim: DEC_DIM = _DEFAULT_ARCH.dec_dim,
+        gpu_ids: GPU_IDS = "",
         cryodrgn_bin_dir: CRYODRGN_BIN_DIR = "",
     ):
         bin_dir = self._resolve_bin_dir({"cryodrgn_bin_dir": cryodrgn_bin_dir})
+        gpus = self._gpu_ids(gpu_ids)
         architecture = _impl.VaeArchitecture(
             zdim, enc_layers, enc_dim, dec_layers, dec_dim
         )
@@ -227,6 +233,7 @@ class CryoDrgnTrainJob(_CryoDrgnJob):
             dose_per_tilt=dose_per_tilt,
             lazy=lazy,
             bin_dir=bin_dir,
+            gpu_ids=gpus,
         )
         yield
         _impl.cryodrgn_train_vae(
@@ -239,6 +246,7 @@ class CryoDrgnTrainJob(_CryoDrgnJob):
             architecture=architecture,
             indices_file=result_backproject.indices_file,
             bin_dir=bin_dir,
+            gpu_ids=gpus,
         )
         yield
         _link_outputs(job_dir, particles_star, in_parts)
@@ -276,9 +284,11 @@ class CryoDrgnTrainContinue(_CryoDrgnJob, RelionExternalContinue):
         enc_dim: ENC_DIM = _DEFAULT_ARCH.enc_dim,
         dec_layers: DEC_LAYERS = _DEFAULT_ARCH.dec_layers,
         dec_dim: DEC_DIM = _DEFAULT_ARCH.dec_dim,
+        gpu_ids: GPU_IDS = "0",
         cryodrgn_bin_dir: CRYODRGN_BIN_DIR = "",
     ):
         bin_dir = self._resolve_bin_dir({"cryodrgn_bin_dir": cryodrgn_bin_dir})
+        gpus = self._gpu_ids(gpu_ids)
         # the network of the checkpoint (from job.star of the first run)
         architecture = _impl.VaeArchitecture(
             zdim, enc_layers, enc_dim, dec_layers, dec_dim
@@ -317,6 +327,7 @@ class CryoDrgnTrainContinue(_CryoDrgnJob, RelionExternalContinue):
             indices_file=str(indices) if indices.is_file() else None,
             load=workdir / f"weights.{last_epoch}.pkl",
             bin_dir=bin_dir,
+            gpu_ids=gpus,
         )
         yield
         _link_outputs(job_dir, particles_star, in_parts)

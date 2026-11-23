@@ -9,7 +9,11 @@ from himena_relion._utils import unwrap_annotated
 from himena_relion._widgets._magicgui import PathDrop
 
 from himena_relion_cryodrgn import _impl
-from himena_relion_cryodrgn._job_base import CRYODRGN_BIN_DIR, _CryoDrgnJob
+from himena_relion_cryodrgn._job_base import (
+    CRYODRGN_BIN_DIR,
+    GPU_IDS,
+    _CryoDrgnJob,
+)
 from himena_relion_cryodrgn.train import CryoDrgnTrainJob
 
 
@@ -192,9 +196,11 @@ class CryoDrgnSelectParticlesJob(_CryoDrgnJob):
         dose_per_tilt: Annotated[
             float, {"label": "Dose per tilt (e/A^2)", "group": "Backprojection"}
         ] = 3.0,
+        gpu_ids: GPU_IDS = "",
         cryodrgn_bin_dir: CRYODRGN_BIN_DIR = "",
     ):
         bin_dir = self._resolve_bin_dir({"cryodrgn_bin_dir": cryodrgn_bin_dir})
+        gpus = self._gpu_ids(gpu_ids)
         train = TrainJobFiles.from_weights(train_weights)
         particles_star = Path(in_parts) if in_parts else train.input_particles()
         job_dir = self.output_job_dir.path
@@ -232,4 +238,5 @@ class CryoDrgnSelectParticlesJob(_CryoDrgnJob):
             indices_file=selection.indices_file,
             force_ntilts=False,  # --force-ntilts would ignore the selection
             bin_dir=bin_dir,
+            gpu_ids=gpus,
         )

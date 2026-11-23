@@ -18,7 +18,11 @@ from typing import Annotated
 from himena_relion.external import RelionExternalContinue
 
 from himena_relion_cryodrgn import _analysis, _impl
-from himena_relion_cryodrgn._job_base import CRYODRGN_BIN_DIR, _CryoDrgnJob
+from himena_relion_cryodrgn._job_base import (
+    CRYODRGN_BIN_DIR,
+    GPU_IDS,
+    _CryoDrgnJob,
+)
 from himena_relion_cryodrgn.select_particles import TrainJobFiles
 from himena_relion_cryodrgn.train import (
     _DEFAULT_ARCH,
@@ -253,9 +257,11 @@ class CryoDrgnTrainGraphTraversal(_CryoDrgnJob, RelionExternalContinue):
         kmeans: KMEANS = -1,
         downsample: DOWNSAMPLE = 0,
         flip: FLIP = False,
+        gpu_ids: GPU_IDS = "",
         cryodrgn_bin_dir: CRYODRGN_BIN_DIR = "",
     ):
         bin_dir = self._resolve_bin_dir({"cryodrgn_bin_dir": cryodrgn_bin_dir})
+        gpus = self._gpu_ids(gpu_ids)
         job_dir = self.output_job_dir.path
         plan = prepare_traversal(
             job_dir,
@@ -279,6 +285,7 @@ class CryoDrgnTrainGraphTraversal(_CryoDrgnJob, RelionExternalContinue):
             max_neighbors=plan.max_neighbors,
             avg_neighbors=plan.avg_neighbors,
             bin_dir=bin_dir,
+            gpu_ids=gpus,
         )
         yield
         _impl.cryodrgn_eval_vol(
@@ -291,4 +298,5 @@ class CryoDrgnTrainGraphTraversal(_CryoDrgnJob, RelionExternalContinue):
             flip=plan.flip,
             invert=plan.invert,
             bin_dir=bin_dir,
+            gpu_ids=gpus,
         )

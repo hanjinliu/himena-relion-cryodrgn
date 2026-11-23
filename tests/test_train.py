@@ -68,29 +68,47 @@ def test_prep_job_star():
     assert params == {"box_size": "64", "dose_per_tilt": "2.5"}
 
 
-def test_all_parameters_fit_in_the_slots():
-    """All the parameters are in the 10 slots of RELION (shown in the RELION GUI)."""
-    model = CryoDrgnTrainJob.prep_job_star(
-        in_mics="Tomograms/job005/tomograms.star",
-        in_parts="Extract/job010/particles.star",
-        box_size=64,
-        lazy=True,
-        n_epochs=50,
-        dose_per_tilt=2.5,
-        zdim=4,
-        enc_layers=2,
-        enc_dim=256,
-        dec_layers=4,
-        dec_dim=512,
-        cryodrgn_bin_dir="/opt/cryodrgn/bin",
-    )
+_ALL_TRAIN_PARAMS = {
+    "in_mics": "Tomograms/job005/tomograms.star",
+    "in_parts": "Extract/job010/particles.star",
+    "box_size": 64,
+    "lazy": True,
+    "n_epochs": 50,
+    "dose_per_tilt": 2.5,
+    "zdim": 4,
+    "enc_layers": 2,
+    "enc_dim": 256,
+    "dec_layers": 4,
+    "dec_dim": 512,
+    "cryodrgn_bin_dir": "/opt/cryodrgn/bin",
+}
+
+
+def test_parameters_fit_in_the_slots():
+    """The parameters are in the 10 slots of RELION (shown in the RELION GUI). There
+    are 11 parameters with the GPU IDs, which are not written if empty (the default).
+    """
+    model = CryoDrgnTrainJob.prep_job_star(**_ALL_TRAIN_PARAMS)
     opts = dict(zip(model.joboptions_values.variable, model.joboptions_values.value))
     labels = {opts[f"param{i}_label"] for i in range(1, 11)}
     assert labels == set(CryoDrgnTrainJob._signature().parameters) - {
         "in_mics",
         "in_parts",
+        "gpu_ids",
     }
     assert opts["other_args"] == ""
+
+
+def test_bin_dir_overflows_with_gpu_ids():
+    """With the GPU IDs, the cryoDRGN bin directory (set in the settings) is passed by
+    "Additional arguments" (other_args): the GPU IDs, changed more often, stay in the
+    slots."""
+    model = CryoDrgnTrainJob.prep_job_star(**_ALL_TRAIN_PARAMS, gpu_ids="0,1")
+    opts = dict(zip(model.joboptions_values.variable, model.joboptions_values.value))
+    slots = {opts[f"param{i}_label"]: opts[f"param{i}_value"] for i in range(1, 11)}
+    assert slots["gpu_ids"] == "0,1"
+    assert "cryodrgn_bin_dir" not in slots
+    assert opts["other_args"] == "--cryodrgn_bin_dir /opt/cryodrgn/bin"
 
 
 def test_default_network(relion_project: RelionProject, fake_cryodrgn: FakeCryoDRGN):

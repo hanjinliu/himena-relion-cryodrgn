@@ -1,8 +1,10 @@
 import os
 import pickle
+import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,24 +35,80 @@ def find_command(name: str, bin_dir: str = "") -> str | None:
     return shutil.which(name, path=bin_dir or None)
 
 
-def _run(args: list[str], bin_dir: str = "", suppress_output: bool = False) -> None:
+CUDA_VISIBLE_DEVICES = "CUDA_VISIBLE_DEVICES"
+
+
+def parse_gpu_ids(text: str) -> list[int]:
+    """GPU IDs of the "GPU IDs to use" parameter, such as "0" or "0,1".
+
+    The IDs are 0-based and separated by commas, as in RELION. ":" (which separates
+    the GPUs of the MPI ranks in RELION) is accepted as a separator too, and empty
+    items are ignored. An empty `text` gives no IDs: cryoDRGN uses its default GPU.
+    """
+    ids: list[int] = []
+    for item in re.split(r"[,:]", text.strip()):
+        item = item.strip()
+        if item == "":
+            continue
+        if not re.fullmatch(r"[0-9]+", item):
+            raise ValueError(
+                f"GPU IDs must be numbers separated by commas (e.g. 0,1): {text!r}"
+            )
+        if int(item) in ids:
+            raise ValueError(f"GPU ID {int(item)} is given twice: {text!r}")
+        ids.append(int(item))
+    return ids
+
+
+def cuda_visible_devices(gpu_ids: Sequence[int], visible: str | None = None) -> str:
+    """The value of CUDA_VISIBLE_DEVICES to run cryoDRGN on the GPUs `gpu_ids`.
+
+    `visible` is CUDA_VISIBLE_DEVICES of the job process (None if not set). As in
+    RELION, the IDs number the GPUs the job can see: if a queueing system assigned
+    GPUs to the job by CUDA_VISIBLE_DEVICES, ID 0 is the first of them, not the first
+    GPU of the machine.
+    """
+    if visible is None:
+        return ",".join(str(i) for i in gpu_ids)
+    devices = [d.strip() for d in visible.split(",") if d.strip()]
+    if unavailable := [i for i in gpu_ids if i >= len(devices)]:
+        raise ValueError(
+            f"GPU ID {unavailable[0]} is not available: {len(devices)} GPU(s) are "
+            f"visible to the job (CUDA_VISIBLE_DEVICES={visible!r})."
+        )
+    return ",".join(devices[i] for i in gpu_ids)
+
+
+def _run(
+    args: list[str],
+    bin_dir: str = "",
+    suppress_output: bool = False,
+    gpu_ids: Sequence[int] = (),
+) -> None:
     """Run a cryoDRGN command, raising `CalledProcessError` if it fails.
 
     If `bin_dir` is given, the command is taken from there and `bin_dir` is put first
     in PATH, so that cryoDRGN can be installed in another environment than
     himena-relion without activating it. `suppress_output` discards the standard
-    output only; error messages (stderr) still go to run.err.
+    output only; error messages (stderr) still go to run.err. If `gpu_ids` are given,
+    the command only sees these GPUs (CUDA_VISIBLE_DEVICES); cryoDRGN uses the first
+    visible GPU, or all of them with `train_vae --multigpu`.
     """
     stdout = subprocess.DEVNULL if suppress_output else None
-    if not bin_dir:
-        subprocess.run(args, check=True, stdout=stdout)
-        return
-    exe = find_command(args[0], bin_dir)
-    if exe is None:
-        raise FileNotFoundError(f"`{args[0]}` was not found in {bin_dir}.")
-    env = os.environ.copy()
-    env["PATH"] = os.pathsep.join([bin_dir, env.get("PATH", "")])
-    subprocess.run([exe, *args[1:]], check=True, env=env, stdout=stdout)
+    env = None  # inherited
+    if bin_dir or gpu_ids:
+        env = os.environ.copy()
+    if gpu_ids:
+        env[CUDA_VISIBLE_DEVICES] = cuda_visible_devices(
+            gpu_ids, os.environ.get(CUDA_VISIBLE_DEVICES)
+        )
+    if bin_dir:
+        exe = find_command(args[0], bin_dir)
+        if exe is None:
+            raise FileNotFoundError(f"`{args[0]}` was not found in {bin_dir}.")
+        env["PATH"] = os.pathsep.join([bin_dir, env.get("PATH", "")])
+        args = [exe, *args[1:]]
+    subprocess.run(args, check=True, env=env, stdout=stdout)
 
 
 def _first_value(star_path, column: str, block: str | None = None):
@@ -207,6 +265,7 @@ def cryodrgn_backproject_voxel(
     indices_file=None,
     force_ntilts: bool = True,
     bin_dir: str = "",
+    gpu_ids: Sequence[int] = (),
 ):
     """Back-project the particles. Tilt-series mode is used if `dose_per_tilt` is given.
 
@@ -238,7 +297,7 @@ def cryodrgn_backproject_voxel(
             kept_indices = str(Path(output_dir) / f"indices_force_ntilts_{ntilts}.pkl")
     if lazy:
         args.append("--lazy")
-    _run(args, bin_dir=bin_dir)
+    _run(args, bin_dir=bin_dir, gpu_ids=gpu_ids)
     return BackprojectOutput(indices_file=kept_indices)
 
 
@@ -276,12 +335,15 @@ def cryodrgn_train_vae(
     indices_file: str | None = None,
     load: str | Path | None = None,
     bin_dir: str = "",
+    gpu_ids: Sequence[int] = (),
 ):
     """Train the VAE for tilt series.
 
     `n_epochs` is the total number of epochs. To train longer, pass the last
     checkpoint (`weights.{epoch}.pkl`) as `load` with a larger `n_epochs`; the other
     arguments, the architecture in particular, must be the same as in the first run.
+    With more than one of `gpu_ids`, the training is parallelized over them
+    (`--multigpu`). cryoDRGN then multiplies the batch size by the number of GPUs.
     """
     cmd = [
         "cryodrgn", "train_vae", str(particles_star),
@@ -299,7 +361,9 @@ def cryodrgn_train_vae(
         cmd.extend(["--ind", str(indices_file)])
     if load is not None:
         cmd.extend(["--load", str(load)])
-    _run(cmd, bin_dir=bin_dir)
+    if len(gpu_ids) > 1:
+        cmd.append("--multigpu")
+    _run(cmd, bin_dir=bin_dir, gpu_ids=gpu_ids)
 
 
 # --- volumes along a path in the latent space --------------------------------------
@@ -318,6 +382,7 @@ def cryodrgn_graph_traversal(
     max_neighbors: int = 10,
     avg_neighbors: float = 5,
     bin_dir: str = "",
+    gpu_ids: Sequence[int] = (),
 ) -> GraphTraversalOutput:
     """Shortest path through the nearest-neighbor graph of z, visiting the anchors.
 
@@ -339,6 +404,7 @@ def cryodrgn_graph_traversal(
             "--outind", out.indices_file,
         ],
         bin_dir=bin_dir,
+        gpu_ids=gpu_ids,
     )  # fmt: skip
     return out
 
@@ -353,6 +419,7 @@ def cryodrgn_eval_vol(
     flip: bool = False,
     invert: bool = False,
     bin_dir: str = "",
+    gpu_ids: Sequence[int] = (),
 ) -> None:
     """Generate a volume for each row of `z_file`: output_dir/vol_001.mrc, ...
 
@@ -371,7 +438,7 @@ def cryodrgn_eval_vol(
         args.append("--flip")
     if invert:
         args.append("--invert")
-    _run(args, bin_dir=bin_dir)
+    _run(args, bin_dir=bin_dir, gpu_ids=gpu_ids)
 
 
 # --- particle selection ----------------------------------------------------------
