@@ -1,7 +1,7 @@
 [project]
 name = "himena-relion-cryodrgn"
 version = "0.1.0"
-description = "Add your description here"
+description = "CryoDRGN plugin for himena-relion"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -41,3 +41,25 @@ pyqt6 = [
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = ["--maxfail=5"]
+
+[project.urls]
+Documentation = "https://github.com/hanjinliu/himena-relion-cryodrgn#readme"
+Issues = "https://github.com/hanjinliu/himena-relion-cryodrgn/issues"
+Source = "https://github.com/hanjinliu/himena-relion-cryodrgn"
+
+
+[tool.coverage.run]
+source_pkgs = ["himena_relion_cryodrgn", "tests"]
+branch = true
+parallel = true
+
+[tool.coverage.paths]
+himena_relion_cryodrgn = ["src/himena_relion_cryodrgn", "*/himena-relion-cryodrgn/src/himena_relion_cryodrgn"]
+tests = ["tests", "*/himena-relion-cryodrgn/tests"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "no cov",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
