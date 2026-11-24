@@ -116,15 +116,13 @@ def _link(job_dir: Path, name: str, target: Path) -> None:
     link.symlink_to(target.relative_to(job_dir))
 
 
-def _link_outputs(job_dir: Path, particles_star: Path, in_parts) -> None:
+def _link_outputs(job_dir: Path, in_parts) -> None:
     """Link the output nodes to the files of the training.
 
-    - weights.pkl -> train/weights.pkl
     - particles.star: a copy of the input RELION particles (in_parts), passed to
       CryoDRGN Select. A copy, so that the selection keeps referring to the rows
       trained on even if the upstream job is run again.
     """
-    _link(job_dir, "weights.pkl", job_dir / "train" / "weights.pkl")
     (job_dir / "particles.star").write_bytes(Path(in_parts).read_bytes())
 
 
@@ -155,7 +153,7 @@ class CryoDrgnTrainJob(_CryoDrgnJob):
 
     def output_nodes(self):
         return [
-            ("weights.pkl", "CryodrgnWeights.pkl"),
+            ("train/weights.pkl", "CryodrgnWeights.pkl"),
             ("particles.star", "ParticleGroupMetadata.star"),
             # back-projection of all the training particles, e.g. a 3D reference
             (_impl.BACKPROJECTION, "DensityMap.mrc"),
@@ -181,7 +179,7 @@ class CryoDrgnTrainJob(_CryoDrgnJob):
         enc_dim: ENC_DIM = _DEFAULT_ARCH.enc_dim,
         dec_layers: DEC_LAYERS = _DEFAULT_ARCH.dec_layers,
         dec_dim: DEC_DIM = _DEFAULT_ARCH.dec_dim,
-        gpu_ids: GPU_IDS = "",
+        gpu_ids: GPU_IDS = "0",
         cryodrgn_bin_dir: CRYODRGN_BIN_DIR = "",
     ):
         bin_dir = self._resolve_bin_dir({"cryodrgn_bin_dir": cryodrgn_bin_dir})
@@ -249,7 +247,7 @@ class CryoDrgnTrainJob(_CryoDrgnJob):
             gpu_ids=gpus,
         )
         yield
-        _link_outputs(job_dir, particles_star, in_parts)
+        _link_outputs(job_dir, in_parts)
         _write_kmeans_classes(self, in_parts)
 
 
@@ -330,5 +328,5 @@ class CryoDrgnTrainContinue(_CryoDrgnJob, RelionExternalContinue):
             gpu_ids=gpus,
         )
         yield
-        _link_outputs(job_dir, particles_star, in_parts)
+        _link_outputs(job_dir, in_parts)
         _write_kmeans_classes(self, in_parts)
